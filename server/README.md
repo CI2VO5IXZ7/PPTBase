@@ -74,6 +74,8 @@ node dist/admin.js backup <目标文件>                 # SQLite 在线备份
 | `POST /api/docs/:id/assets` | 编辑令牌 | 网页端上传图片 |
 | `GET /assets/:file` | 无 | 图片（文件名不可猜） |
 
+| `POST /mcp` | Key | 远程 MCP 端点（Streamable HTTP，无状态）；GET/DELETE 返回 405 |
+
 ### Agent 原子操作（ops）
 
 ```ts
@@ -94,6 +96,51 @@ node dist/admin.js backup <目标文件>                 # SQLite 在线备份
 
 网页端 `PUT` 带 `baseVersion`：与当前版本一致直接写；落后时用 `base / 服务端 / 浏览器` 三方合并（按页面和元素 id），同一元素两边都改返回 409。
 
+## MCP（远程 Agent 接入）
+
+`POST /mcp`：Streamable HTTP、无状态（每个请求独立鉴权），凭证为 `Authorization: Bearer pk_…`；GET/DELETE 返回 405，不带 Key 返回 401。连接后服务端通过 `instructions` 注入精简编写规范，`get_authoring_guide` 工具可分段取 `doc/AI_PPT_SCHEMA.md` 全文。
+
+工具（导出类 render_slide / export_presentation / get_export 在 M4 接入）：
+
+- 指南：`get_authoring_guide`
+- 文档：`create_presentation` / `list_presentations` / `get_presentation`（默认 outline 视图省 token）/ `get_slide` / `delete_presentation` / `rotate_links`
+- 编辑：`add_slides` / `update_slide` / `delete_slides` / `move_slide` / `add_elements` / `update_elements` / `delete_elements` / `batch_edit` / `set_theme`
+- 协作：`get_changes`（看用户改了什么）/ `list_comments` / `add_comment` / `reply_comment`
+- 素材：`upload_image`（外链转存或 base64，返回 `/assets/...` 地址）
+
+### 客户端配置
+
+Hermes（`~/.hermes/config.yaml` 的 `mcp_servers`）：
+
+```yaml
+mcp_servers:
+  pptist:
+    url: https://你的域名/mcp
+    headers:
+      Authorization: Bearer pk_...
+```
+
+DeepSeek Harness（`dsh-mcp-client`，工具调用超时保持默认 60s 即可）：
+
+```yaml
+mcp_servers:
+  pptist:
+    transport: streamable-http
+    url: https://你的域名/mcp
+    headers:
+      Authorization: Bearer pk_...
+```
+
+Grok Bot（远程 MCP，具体字段名以它的文档为准）：
+
+```yaml
+mcp_servers:
+  pptist:
+    url: https://你的域名/mcp
+    headers:
+      Authorization: Bearer pk_...
+```
+
 ## 后续里程碑
 
-- MCP 端点 `/mcp`（M2）、网页端接入（M3）、导出 PPTX/PDF/PNG（M4）、Docker 部署（M5）：见后续里程碑。
+- 网页端接入（M3）、导出 PPTX/PDF/PNG（M4）、Docker 部署（M5）：见后续里程碑。

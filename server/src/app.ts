@@ -6,6 +6,7 @@ import type { AppConfig } from './config'
 import { openDb, type Db } from './db'
 import { createDocService } from './docs/service'
 import { AppError } from './errors'
+import { mcpRoutes } from './mcp/server'
 import { assetsRoutes } from './routes/assets'
 import { docsRoutes } from './routes/docs'
 
@@ -56,7 +57,8 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
 
   await app.register(docsRoutes({ db: ownDb, config, service }))
   await app.register(assetsRoutes({ db: ownDb, config }))
-  // M2 /mcp、M4 exports 路由在此挂载
+  await app.register(mcpRoutes({ db: ownDb, config, service }))
+  // M4 exports 路由在此挂载
 
   return app
 }
