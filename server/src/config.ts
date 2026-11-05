@@ -9,6 +9,7 @@ export interface AppConfig {
   secret: Buffer
   publicBaseUrl: string
   renderBaseUrl: string
+  staticDir: string
   defaultQuotaDocs: number
   defaultQuotaDocBytes: number
   defaultQuotaExportsPerDay: number
@@ -56,6 +57,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     secret: loadOrCreateSecret(dataDir),
     publicBaseUrl: env.PUBLIC_BASE_URL ?? 'http://localhost:5173',
     renderBaseUrl: env.RENDER_BASE_URL ?? `http://127.0.0.1:${port}`,
+    // 生产模式下前端构建产物目录；目录里没有 index.html 就不启用静态托管（开发模式走 vite）
+    staticDir: resolve(env.STATIC_DIR ?? './dist'),
     defaultQuotaDocs: intEnv(env, 'DEFAULT_QUOTA_DOCS', 100),
     defaultQuotaDocBytes: intEnv(env, 'DEFAULT_QUOTA_DOC_MB', 10) * 1024 * 1024,
     defaultQuotaExportsPerDay: intEnv(env, 'DEFAULT_QUOTA_EXPORTS_PER_DAY', 200),

@@ -9,6 +9,10 @@ import Components from 'unplugin-vue-components/vite'
 // https://vitejs.dev/config/
 export default defineConfig({
   base: '',
+  build: {
+    // 打包产物放 /static/，把 /assets 前缀留给服务端用户资产路由（GET /assets/:file）
+    assetsDir: 'static',
+  },
   plugins: [
     vue(),
     Components({

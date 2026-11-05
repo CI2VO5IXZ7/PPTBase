@@ -30,7 +30,8 @@ npm start            # node dist/index.js
 | `PORT` / `HOST` | `3100` / `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `./data` | 数据库、资产、导出文件、密钥 |
 | `PUBLIC_BASE_URL` | `http://localhost:5173` | 拼 editUrl/viewUrl，生产填 `https://域名` |
-| `RENDER_BASE_URL` | `http://127.0.0.1:$PORT` | 无头浏览器地址（M4） |
+| `RENDER_BASE_URL` | `http://127.0.0.1:$PORT` | 无头浏览器地址（M4）；容器内自指 `http://127.0.0.1:3100` |
+| `STATIC_DIR` | `./dist` | 前端构建产物目录；目录里有 `index.html` 才启用静态托管（开发模式自动跳过） |
 | `DEFAULT_QUOTA_DOCS` / `DEFAULT_QUOTA_DOC_MB` / `DEFAULT_QUOTA_EXPORTS_PER_DAY` | 100 / 10 / 200 | 默认配额 |
 | `RATE_LIMIT_PER_MIN` | 120 | 每 Key/令牌每分钟限流 |
 | `MAX_ASSET_MB` | 10 | 单张图片上限 |
@@ -49,8 +50,10 @@ node dist/admin.js key create alice --label hermes  # 追加 Key（建议每个 
 node dist/admin.js key list alice                   # 只显示前缀
 node dist/admin.js key revoke <keyId>
 node dist/admin.js quota set alice --docs 100 --doc-mb 10 --exports-per-day 200
-node dist/admin.js backup <目标文件>                 # SQLite 在线备份
+node dist/admin.js backup <目标文件>                 # SQLite 在线备份（db.backup()）
 ```
+
+Docker 部署时 `pptist-admin` 已在容器 PATH 上，用 `docker compose exec app pptist-admin ...` 执行（见下文「部署」）。
 
 ## REST 接口
 
@@ -155,6 +158,44 @@ mcp_servers:
 - 浏览器懒启动常驻、崩溃自动重启；渲染队列并发 `EXPORT_CONCURRENCY`（默认 2）、单任务超时 120s、等待位上限 20（超了返回 429）。
 - 导出文件写到 `DATA_DIR/exports/`，文件名 21 位随机串；每小时清理超过 24h 的文件和任务记录。
 
-## 后续里程碑
+## 部署（Docker Compose，M5）
 
-- Docker 部署（M5）：见后续里程碑。
+### 结构
+
+- `Dockerfile`（仓库根目录，多阶段）：`node:22-bookworm` 构建前端 `dist/` 与 `server/dist/`；运行阶段用 `mcr.microsoft.com/playwright:v1.56.1-noble`（自带 Chromium 与依赖，版本与 `server/package.json` 的 `playwright ~1.56.x` 对齐，以 package-lock 实际安装版本为准）。
+- 容器内非 root（`pwuser`）运行，`pptist-admin` 已链接到 `/usr/local/bin`；`EXPOSE 3100`，健康检查 `/api/health`。
+- 单容器内：Fastify 托管前端构建产物（`STATIC_DIR`，SPA fallback）+ REST `/api/*` + MCP `/mcp` + 资产 `/assets/*` + 导出 `/exports/*` + Playwright Chromium（经 `RENDER_BASE_URL` 自指打开导出页）。
+- 前端打包资源走 `/static/`（`vite.config.ts` 的 `build.assetsDir`），把 `/assets` 前缀留给服务端资产路由，二者不冲突。
+- `docker-compose.yml`：`app`（挂载 `./data:/data`，`mem_limit: 3g`，`restart: unless-stopped`）+ 可选 `caddy`（`profile: https`，默认不启动）。`mem_limit` 适用于 compose v2 非 swarm；swarm 模式请改用 `deploy.resources.limits.memory`。
+- `Caddyfile`：`reverse_proxy app:3100` + `flush_interval -1`（SSE/流式关闭缓冲）。
+
+### 本地跑一遍
+
+```bash
+mkdir -p data                        # 先建好，否则 docker 自动创建会归 root 导致容器写不了
+docker compose build                 # 或 docker build -t pptist-app:local .
+docker compose up -d                 # 仅 app，宿主 127.0.0.1:3100（避开 3000/3030/4000）
+curl http://127.0.0.1:3100/api/health          # → {"ok":true}
+curl -I http://127.0.0.1:3100/                  # → 200 text/html（前端 index）
+docker compose exec app pptist-admin user create alice   # 建用户，保存输出的 pk_ Key
+docker compose exec app pptist-admin key create alice --label hermes
+docker compose exec app pptist-admin backup /data/backup-$(date +%F).db   # 备份
+docker compose logs -f app
+docker compose down
+```
+
+冒烟：浏览器开 `http://127.0.0.1:3100/?doc=<id>#t=<token>`（`user create` 后用 `POST /api/docs` 拿 editUrl）；`POST /mcp` 带 `Authorization: Bearer pk_…`。
+
+### 部署到 honcho / VPS
+
+> 测试目标机为 **honcho**；以下步骤对任何装有 Docker 的 Linux 主机通用（计划书中的 VPS 4C8G + Caddy 公网方案作为参考）。真实域名、Key、证书一律不入库。
+
+1. 同步代码到主机：`git clone` 或 `git pull`。
+2. （启用 HTTPS 时）DNS 把 `pptist.example.com` 换成真实域名并解析到主机；防火墙/安全组放行 80、443。应用端口 3100 只需容器网络内部可达；宿主映射避开 3000/3030/4000。
+3. 编辑 `Caddyfile` 把 `pptist.example.com` 换成真实域名；`docker-compose.yml` 里 `PUBLIC_BASE_URL` 改为 `https://你的域名`。`RENDER_BASE_URL` 保持 `http://127.0.0.1:3100`（容器内自指）。
+4. 启动：`docker compose --profile https up -d`；宿主 80/443 被占或不需 HTTPS 时，去掉 `--profile https` 仅起 app。
+5. 首个用户：`docker compose exec app pptist-admin user create <name>`，保存输出的 `pk_` Key（只显示一次）。
+6. 按「客户端配置」把 `https://你的域名/mcp` + `Authorization: Bearer pk_…` 配进 Agent。
+7. 备份：`docker compose exec app pptist-admin backup /data/backup-$(date +%F).db`，产物在宿主 `./data/` 下，建议再定时异地拷贝。
+
+资源建议：内存 ≥ 4G（`mem_limit 3g` + Chromium + Caddy），磁盘按资产与导出量预估；`./data` 需要能被容器内 `pwuser`（playwright noble 镜像中 uid 1001）写入，宿主办不到时改用 named volume。

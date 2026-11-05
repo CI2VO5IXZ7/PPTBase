@@ -148,7 +148,8 @@ function quotaSet(db: Db, args: string[]): void {
 
 async function main(): Promise<void> {
   const [resource, action, ...rest] = process.argv.slice(2)
-  if (!resource || !action) {
+  // backup 只有一个参数（目标文件），会落在 action 上，其余命令都是 <resource> <action> [...args]
+  if (!resource || (resource !== 'backup' && !action)) {
     console.log(USAGE)
     process.exit(resource ? 1 : 0)
   }
@@ -165,7 +166,8 @@ async function main(): Promise<void> {
     else if (resource === 'key' && action === 'revoke') keyRevoke(db, rest)
     else if (resource === 'quota' && action === 'set') quotaSet(db, rest)
     else if (resource === 'backup') {
-      const target = rest[0] ?? fail('缺少目标文件路径')
+      const target = action ?? fail('缺少目标文件路径')
+      if (rest.length) fail('backup 只接受一个目标文件参数')
       await db.backup(target)
       console.log(`已备份数据库到 ${target}`)
     }

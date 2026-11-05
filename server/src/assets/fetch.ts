@@ -1,5 +1,5 @@
-import { isIP } from 'node:net'
-import { lookup, type LookupFunction } from 'node:dns'
+import { isIP, type LookupFunction } from 'node:net'
+import { lookup } from 'node:dns'
 import http from 'node:http'
 import https from 'node:https'
 

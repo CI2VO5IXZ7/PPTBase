@@ -1,5 +1,9 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
+import fastifyStatic from '@fastify/static'
 
 import { rateLimitKey } from './auth'
 import type { AppConfig } from './config'
@@ -61,6 +65,25 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
   await app.register(assetsRoutes({ db: ownDb, config }))
   await app.register(exportsRoutes({ db: ownDb, config, queue: renderQueue }))
   await app.register(mcpRoutes({ db: ownDb, config, service, queue: renderQueue }))
+
+  // 生产模式：托管前端构建产物。只认包含 index.html 的目录，
+  // 开发模式（server 目录下 ./dist 是 esbuild 产物，没有 index.html）自动跳过
+  if (existsSync(join(config.staticDir, 'index.html'))) {
+    await app.register(fastifyStatic, { root: config.staticDir })
+
+    // SPA fallback：GET 且不属于 API / MCP / 资产 / 导出路径时回退 index.html；
+    // 这些保留路径走不到这里时（无匹配路由）仍返回 JSON 404
+    app.setNotFoundHandler((req, reply) => {
+      const path = (req.raw.url ?? '/').split('?')[0]
+      const reserved = path === '/api' || path.startsWith('/api/')
+        || path === '/mcp' || path.startsWith('/mcp/')
+        || path.startsWith('/assets/') || path.startsWith('/exports/')
+      if (req.method === 'GET' && !reserved) {
+        return reply.sendFile('index.html')
+      }
+      reply.status(404).send({ error: 'not_found', message: '资源不存在' })
+    })
+  }
 
   return app
 }
