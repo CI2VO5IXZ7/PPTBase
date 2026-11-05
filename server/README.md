@@ -73,6 +73,10 @@ node dist/admin.js backup <目标文件>                 # SQLite 在线备份
 | `POST /api/assets` | Key | `{ url }` 或 `{ data: base64 }` → `{ id, url }` |
 | `POST /api/docs/:id/assets` | 编辑令牌 | 网页端上传图片 |
 | `GET /assets/:file` | 无 | 图片（文件名不可猜） |
+| `POST /api/docs/:id/exports` | Key / 编辑令牌 | `{ format: 'pptx'\|'pdf'\|'png'\|'json', slides?, options? }`；`EXPORT_SYNC_WAIT_MS` 内完成返回 `{ status:'done', url }`，否则 `{ status:'pending', jobId }` |
+| `GET /api/exports/:jobId` | Key / 令牌 | 导出任务状态 |
+| `GET /exports/:file` | 无（21 位随机文件名，24h 清理） | 下载导出文件 |
+| `GET /api/docs/:id/slides/:index.png?width=` | Key / 令牌 | 单页 PNG 截图（width 默认 1000，16~4000） |
 
 | `POST /mcp` | Key | 远程 MCP 端点（Streamable HTTP，无状态）；GET/DELETE 返回 405 |
 
@@ -100,13 +104,14 @@ node dist/admin.js backup <目标文件>                 # SQLite 在线备份
 
 `POST /mcp`：Streamable HTTP、无状态（每个请求独立鉴权），凭证为 `Authorization: Bearer pk_…`；GET/DELETE 返回 405，不带 Key 返回 401。连接后服务端通过 `instructions` 注入精简编写规范，`get_authoring_guide` 工具可分段取 `doc/AI_PPT_SCHEMA.md` 全文。
 
-工具（导出类 render_slide / export_presentation / get_export 在 M4 接入）：
+工具：
 
 - 指南：`get_authoring_guide`
 - 文档：`create_presentation` / `list_presentations` / `get_presentation`（默认 outline 视图省 token）/ `get_slide` / `delete_presentation` / `rotate_links`
 - 编辑：`add_slides` / `update_slide` / `delete_slides` / `move_slide` / `add_elements` / `update_elements` / `delete_elements` / `batch_edit` / `set_theme`
 - 协作：`get_changes`（看用户改了什么）/ `list_comments` / `add_comment` / `reply_comment`
 - 素材：`upload_image`（外链转存或 base64，返回 `/assets/...` 地址）
+- 导出：`render_slide`（单页 PNG 截图）/ `export_presentation`（pptx/pdf/png/json）/ `get_export`（查任务状态）
 
 ### 客户端配置
 
@@ -141,6 +146,15 @@ mcp_servers:
       Authorization: Bearer pk_...
 ```
 
+## 渲染与导出（M4）
+
+导出复用前端代码：无头 Chromium（Playwright）打开 `RENDER_BASE_URL/?mode=export`，调用页面上的 `window.__PPTIST_EXPORT__`（`src/views/ExportRuntime`）生成 PPTX；PDF 用 `page.pdf()`，PNG 用元素截图；JSON 不走浏览器。
+
+- 开发环境：`RENDER_BASE_URL` 指向 vite dev（如 `http://127.0.0.1:5173`）即可，外链图片/字体经服务端防 SSRF 代理回传给页面。
+- 需要 Playwright Chromium：`npx playwright install chromium`（缺系统库时 `--with-deps`，或参考 Dockerfile 的官方 Playwright 镜像）。
+- 浏览器懒启动常驻、崩溃自动重启；渲染队列并发 `EXPORT_CONCURRENCY`（默认 2）、单任务超时 120s、等待位上限 20（超了返回 429）。
+- 导出文件写到 `DATA_DIR/exports/`，文件名 21 位随机串；每小时清理超过 24h 的文件和任务记录。
+
 ## 后续里程碑
 
-- 网页端接入（M3）、导出 PPTX/PDF/PNG（M4）、Docker 部署（M5）：见后续里程碑。
+- Docker 部署（M5）：见后续里程碑。

@@ -28,6 +28,9 @@ const EXPECTED_TOOLS = [
   'rotate_links',
   'delete_presentation',
   'upload_image',
+  'render_slide',
+  'export_presentation',
+  'get_export',
 ]
 
 let ctx: TestContext
@@ -85,10 +88,6 @@ describe('MCP 端点 /mcp', () => {
       const { tools } = await client.listTools()
       const names = tools.map(tool => tool.name)
       for (const name of EXPECTED_TOOLS) expect(names).toContain(name)
-      // M4 导出工具本期不注册
-      expect(names).not.toContain('render_slide')
-      expect(names).not.toContain('export_presentation')
-      expect(names).not.toContain('get_export')
     }
     finally {
       await client.close()

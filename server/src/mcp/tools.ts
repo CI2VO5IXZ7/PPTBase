@@ -9,6 +9,9 @@ import type { Db, DocumentRow } from '../db'
 import { toOutline } from '../docs/outline'
 import type { Op } from '../docs/ops'
 import type { DocService } from '../docs/service'
+import { exportQuotaFor, exportsUsedToday, getExportJob, submitExport } from '../render/jobs'
+import { EXPORT_FORMATS, renderSlideImage, type ExportFormat } from '../render/export'
+import type { RenderQueue } from '../render/queue'
 import type { DocData } from '../schema/document'
 import { AppError } from '../errors'
 import { getAuthoringGuide } from './guide'
@@ -18,13 +21,17 @@ export interface McpContext {
   db: Db
   config: AppConfig
   service: DocService
+  queue: RenderQueue
   ownerId: string
   keyId: string
 }
 
 interface TextResult {
   [key: string]: unknown
-  content: { type: 'text', text: string }[]
+  content: (
+    | { type: 'text', text: string }
+    | { type: 'image', data: string, mimeType: string }
+  )[]
   isError?: boolean
 }
 
@@ -57,7 +64,7 @@ function fail(err: unknown): TextResult {
 
 // 每个 MCP 请求新建一个 McpServer（无状态模式），ownerId/keyId 来自本次请求的 Bearer Key
 export function buildMcpServer(ctx: McpContext): McpServer {
-  const { db, config, service, ownerId, keyId } = ctx
+  const { db, config, service, queue, ownerId, keyId } = ctx
   const server = new McpServer(
     { name: 'pptist', version: '0.1.0' },
     { instructions: MCP_INSTRUCTIONS },
@@ -348,6 +355,87 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     throw AppError.validation('需要 url 或 base64 之一')
   }))
 
-  // render_slide / export_presentation / get_export 属于 M4，本期不注册
+  server.registerTool('render_slide', {
+    description: '把指定页渲染成 PNG 截图并返回图片内容，用于导出前自检排版是否溢出/重叠。index 页码从 0 开始，width 为输出像素宽（默认 1000，建议 500~2000）。返回里附带可调用的 REST 截图地址。',
+    inputSchema: {
+      docId: docIdField,
+      index: z.number().int().min(0).describe('页码，从 0 开始'),
+      width: z.number().int().min(16).max(4000).optional().describe('输出图片宽度像素，默认 1000'),
+    },
+  }, async ({ docId, index, width }: { docId: string, index: number, width?: number }): Promise<TextResult> => {
+    try {
+      const { row, data } = docData(docId)
+      if (index >= data.slides.length) {
+        throw AppError.validation(`页码 ${index} 超出范围（共 ${data.slides.length} 页）`)
+      }
+      const w = width ?? 1000
+      const png = await queue.run(() => renderSlideImage({ config }, row, index, w))
+      return {
+        content: [
+          { type: 'image', data: png.toString('base64'), mimeType: 'image/png' },
+          {
+            type: 'text',
+            text: JSON.stringify({
+              docId,
+              index,
+              width: w,
+              url: `${config.publicBaseUrl}/api/docs/${docId}/slides/${index}.png?width=${w}`,
+            }, null, 2),
+          },
+        ],
+      }
+    }
+    catch (err) {
+      return fail(err)
+    }
+  })
+
+  server.registerTool('export_presentation', {
+    description: '导出文档为 pptx / pdf / png / json。slides 可传页码子集（从 0 开始）。计入每日导出配额；约 45 秒内完成直接返回 url，否则返回 pending + jobId，稍后用 get_export 轮询。多页 png 返回 zip 包。',
+    inputSchema: {
+      docId: docIdField,
+      format: z.enum(EXPORT_FORMATS as [ExportFormat, ...ExportFormat[]]).describe('导出格式：pptx | pdf | png | json'),
+      slides: z.array(z.number().int().min(0)).optional().describe('只导出这些页（页码从 0 开始），不传导出全部'),
+    },
+  }, call(async ({ docId, format, slides }: { docId: string, format: ExportFormat, slides?: number[] }) => {
+    const { row, data } = docData(docId)
+    const bad = slides?.find(i => !Number.isInteger(i) || i < 0 || i >= data.slides.length)
+    if (bad !== undefined) {
+      throw AppError.validation(`slides 包含非法页码 ${bad}（共 ${data.slides.length} 页）`)
+    }
+    const quota = exportQuotaFor(db, config, ownerId)
+    if (exportsUsedToday(db, ownerId) >= quota) {
+      throw AppError.quotaExceeded(`今日导出次数已达上限（${quota} 次/天）`)
+    }
+    const { job, settled } = submitExport({ db, config, queue }, row, { format, slides })
+    const finished = await Promise.race([
+      settled.then(() => true),
+      new Promise<false>(resolve => setTimeout(() => resolve(false), config.exportSyncWaitMs)),
+    ])
+    if (!finished) return { status: 'pending', jobId: job.id }
+    const latest = getExportJob(db, job.id)!
+    return {
+      status: latest.status,
+      jobId: latest.id,
+      ...(latest.file ? { url: `${config.publicBaseUrl}/exports/${latest.file}` } : {}),
+      ...(latest.error ? { error: latest.error } : {}),
+    }
+  }))
+
+  server.registerTool('get_export', {
+    description: '查询导出任务状态：pending/running 时稍后重试，done 时返回下载 url（24h 内有效），failed 时返回 error。',
+    inputSchema: { jobId: z.string().min(1).describe('export_presentation 返回的任务 id') },
+  }, call(({ jobId }: { jobId: string }) => {
+    const job = getExportJob(db, jobId)
+    if (!job || job.owner_id !== ownerId) throw AppError.notFound('导出任务不存在')
+    return {
+      jobId: job.id,
+      status: job.status,
+      format: job.format,
+      ...(job.file ? { url: `${config.publicBaseUrl}/exports/${job.file}` } : {}),
+      ...(job.error ? { error: job.error } : {}),
+    }
+  }))
+
   return server
 }

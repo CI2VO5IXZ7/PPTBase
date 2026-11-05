@@ -1,6 +1,5 @@
 <template>
-  <!-- M4：mode=export 的 ExportRuntime 挂载点，本里程碑暂不实现 -->
-  <div class="export-runtime" v-if="isExportMode"></div>
+  <ExportRuntime v-if="isExportMode" />
   <div class="invalid-link" v-else-if="loadFailed">链接无效或已失效</div>
   <template v-else-if="slides.length">
     <Screen v-if="screening" />
@@ -26,6 +25,7 @@ import Editor from './views/Editor/index.vue'
 import Screen from './views/Screen/index.vue'
 import Mobile from './views/Mobile/index.vue'
 import Viewer from './views/Viewer/index.vue'
+import ExportRuntime from './views/ExportRuntime/index.vue'
 import FullscreenSpin from '@/components/FullscreenSpin.vue'
 
 const _isPC = isPC()
@@ -77,7 +77,7 @@ onMounted(async () => {
     screenStore.setScreening(true)
   }
   else if (isExportMode) {
-    // M4 挂载点：ExportRuntime 后续在此渲染
+    // 无头导出页：由 ExportRuntime 自挂 window.__PPTIST_EXPORT__，等待服务端 load()
   }
   else if (docId) {
     try {

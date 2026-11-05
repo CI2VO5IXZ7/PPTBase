@@ -7,24 +7,26 @@ import { openDb, type Db } from './db'
 import { createDocService } from './docs/service'
 import { AppError } from './errors'
 import { mcpRoutes } from './mcp/server'
+import { closeBrowser } from './render/browser'
+import { RenderQueue } from './render/queue'
 import { assetsRoutes } from './routes/assets'
 import { docsRoutes } from './routes/docs'
+import { exportsRoutes } from './routes/exports'
 
 export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boolean }): Promise<FastifyInstance> {
   // 测试时可直接传入已打开的 db；否则按 DATA_DIR 打开并随 app 关闭
   const ownDb = db ?? openDb(config.dataDir)
   const service = createDocService({ db: ownDb, config })
+  const renderQueue = new RenderQueue(config.exportConcurrency)
 
   const app = Fastify({
     logger: opts?.logger ?? true,
     bodyLimit: 12 * 1024 * 1024,
   })
-  if (!db) {
-    app.addHook('onClose', (instance, done) => {
-      ownDb.close()
-      done()
-    })
-  }
+  app.addHook('onClose', (instance, done) => {
+    if (!db) ownDb.close()
+    void closeBrowser().then(() => done())
+  })
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof AppError) {
@@ -57,8 +59,8 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
 
   await app.register(docsRoutes({ db: ownDb, config, service }))
   await app.register(assetsRoutes({ db: ownDb, config }))
-  await app.register(mcpRoutes({ db: ownDb, config, service }))
-  // M4 exports 路由在此挂载
+  await app.register(exportsRoutes({ db: ownDb, config, queue: renderQueue }))
+  await app.register(mcpRoutes({ db: ownDb, config, service, queue: renderQueue }))
 
   return app
 }

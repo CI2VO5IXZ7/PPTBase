@@ -1,5 +1,5 @@
 import { isIP } from 'node:net'
-import { lookup } from 'node:dns'
+import { lookup, type LookupFunction } from 'node:dns'
 import http from 'node:http'
 import https from 'node:https'
 
@@ -58,11 +58,20 @@ export function assertFetchableUrl(raw: string): URL {
 }
 
 // 自定义 lookup：连接前校验解析出的 IP，防 DNS rebinding
-function makeLookup() {
-  return (hostname: string, _options: unknown, cb: (err: Error | null, address: string | { address: string, family: number }[], family: number) => void) => {
-    lookup(hostname, { all: false }, (err, address, family) => {
+// 注意 Node ≥20 的 autoSelectFamily 会以 all:true 调用 lookup 并期望返回地址数组，两种形态都要处理
+function makeLookup(): LookupFunction {
+  return (hostname: string, options, cb) => {
+    lookup(hostname, options, (err, address, family) => {
       if (err) {
         cb(err, '', 0)
+        return
+      }
+      if (Array.isArray(address)) {
+        if (address.some(item => isBlockedIp(item.address))) {
+          cb(AppError.forbidden(`域名 ${hostname} 解析到内网地址，已拒绝`), '', 0)
+          return
+        }
+        cb(null, address)
         return
       }
       if (isBlockedIp(address)) {

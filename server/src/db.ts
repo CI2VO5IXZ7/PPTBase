@@ -57,8 +57,22 @@ export interface AssetRow {
   created_at: number
 }
 
+export type ExportJobStatus = 'pending' | 'running' | 'done' | 'failed'
+
+export interface ExportJobRow {
+  id: string
+  owner_id: string
+  doc_id: string
+  version: number
+  format: string
+  status: ExportJobStatus
+  file: string | null
+  error: string | null
+  created_at: number
+  finished_at: number | null
+}
+
 // user_version 顺序迁移；新增表结构时追加下一段并把版本号 +1
-// export_jobs 表留给 M4
 const MIGRATIONS: string[] = [
   // v1：多用户、Key、文档、修订、资产
   `
@@ -82,6 +96,13 @@ const MIGRATIONS: string[] = [
   CREATE TABLE assets (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, mime TEXT NOT NULL,
     size INTEGER NOT NULL, sha256 TEXT NOT NULL, created_at INTEGER NOT NULL,
     UNIQUE (owner_id, sha256));
+  `,
+  // v2：导出任务
+  `
+  CREATE TABLE export_jobs (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, doc_id TEXT NOT NULL,
+    version INTEGER NOT NULL, format TEXT NOT NULL, status TEXT NOT NULL,
+    file TEXT, error TEXT, created_at INTEGER NOT NULL, finished_at INTEGER);
+  CREATE INDEX export_jobs_owner ON export_jobs(owner_id, created_at);
   `,
 ]
 

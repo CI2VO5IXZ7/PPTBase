@@ -54,4 +54,8 @@ export class AppError extends Error {
   static docTooLarge(message: string) {
     return new AppError(413, 'doc_too_large', message)
   }
+
+  static exportFailed(message: string) {
+    return new AppError(500, 'export_failed', message)
+  }
 }

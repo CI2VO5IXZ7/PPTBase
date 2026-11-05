@@ -5,16 +5,18 @@ import { authenticateKey } from '../auth'
 import type { AppConfig } from '../config'
 import type { Db } from '../db'
 import type { DocService } from '../docs/service'
+import type { RenderQueue } from '../render/queue'
 import { buildMcpServer } from './tools'
 
 interface McpRoutesDeps {
   db: Db
   config: AppConfig
   service: DocService
+  queue: RenderQueue
 }
 
 // 远程 MCP 端点：无状态模式，每个 POST 先按 Bearer Key 鉴权，再新建 server + transport 处理
-export function mcpRoutes({ db, config, service }: McpRoutesDeps): FastifyPluginAsync {
+export function mcpRoutes({ db, config, service, queue }: McpRoutesDeps): FastifyPluginAsync {
   return app => {
     for (const method of ['GET', 'DELETE'] as const) {
       app.route({
@@ -30,7 +32,7 @@ export function mcpRoutes({ db, config, service }: McpRoutesDeps): FastifyPlugin
       const { userId, keyId } = authenticateKey(db, req)
       reply.hijack()
 
-      const mcpServer = buildMcpServer({ db, config, service, ownerId: userId, keyId })
+      const mcpServer = buildMcpServer({ db, config, service, queue, ownerId: userId, keyId })
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
       reply.raw.on('close', () => {
         void transport.close()
