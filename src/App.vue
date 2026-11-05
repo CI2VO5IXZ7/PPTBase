@@ -1,6 +1,10 @@
 <template>
-  <template v-if="slides.length">
+  <!-- M4：mode=export 的 ExportRuntime 挂载点，本里程碑暂不实现 -->
+  <div class="export-runtime" v-if="isExportMode"></div>
+  <div class="invalid-link" v-else-if="loadFailed">链接无效或已失效</div>
+  <template v-else-if="slides.length">
     <Screen v-if="screening" />
+    <Viewer v-else-if="isViewMode" />
     <Editor v-else-if="_isPC" />
     <Mobile v-else />
   </template>
@@ -8,18 +12,20 @@
 </template>
 
 <script lang="ts" setup>
-import { onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { nanoid } from 'nanoid'
-import { useScreenStore, useMainStore, useSnapshotStore, useSlidesStore } from '@/store'
+import { useScreenStore, useMainStore, useSnapshotStore, useSlidesStore, useDocumentStore } from '@/store'
 import { LOCALSTORAGE_KEY_DISCARDED_DB } from '@/configs/storage'
 import { deleteDiscardedDB } from '@/utils/database'
 import { isPC } from '@/utils/common'
+import useDocumentSync from '@/hooks/useDocumentSync'
 import api from '@/services'
 
 import Editor from './views/Editor/index.vue'
 import Screen from './views/Screen/index.vue'
 import Mobile from './views/Mobile/index.vue'
+import Viewer from './views/Viewer/index.vue'
 import FullscreenSpin from '@/components/FullscreenSpin.vue'
 
 const _isPC = isPC()
@@ -28,14 +34,38 @@ const mainStore = useMainStore()
 const slidesStore = useSlidesStore()
 const snapshotStore = useSnapshotStore()
 const screenStore = useScreenStore()
+const documentStore = useDocumentStore()
 const { databaseId } = storeToRefs(mainStore)
 const { slides } = storeToRefs(slidesStore)
 const { screening } = storeToRefs(screenStore)
+const { role } = storeToRefs(documentStore)
 
-const isAudienceMode = new URLSearchParams(window.location.search).get('mode') === 'audience'
+const urlParams = new URLSearchParams(window.location.search)
+const mode = urlParams.get('mode')
+const docId = urlParams.get('doc')
+const tokenMatch = window.location.hash.match(/^#t=(.*)$/)
+
+const isAudienceMode = mode === 'audience'
+const isExportMode = mode === 'export'
+const isViewMode = computed(() => mode === 'view' || role.value === 'view')
+
+const loadFailed = ref(false)
+
+const docSync = useDocumentSync()
+
+// 有 doc 时把文档令牌存进 document store，并用 replaceState 去掉地址栏 hash，避免分享截图泄露令牌
+if (docId) {
+  documentStore.setCredentials(docId, tokenMatch?.[1] || '')
+  if (tokenMatch) window.history.replaceState(null, '', window.location.pathname + window.location.search)
+}
 
 if (import.meta.env.MODE !== 'development') {
-  window.onbeforeunload = () => false
+  window.onbeforeunload = e => {
+    if (docSync.hasUnsavedChanges()) {
+      e.preventDefault()
+      return false
+    }
+  }
 }
 
 onMounted(async () => {
@@ -45,6 +75,20 @@ onMounted(async () => {
       elements: [],
     }])
     screenStore.setScreening(true)
+  }
+  else if (isExportMode) {
+    // M4 挂载点：ExportRuntime 后续在此渲染
+  }
+  else if (docId) {
+    try {
+      await docSync.init()
+    }
+    catch {
+      loadFailed.value = true
+      return
+    }
+    await deleteDiscardedDB()
+    snapshotStore.initSnapshotDatabase()
   }
   else {
     const slides = await api.getMockData('slides')
@@ -70,5 +114,13 @@ window.addEventListener('beforeunload', () => {
 <style lang="scss">
 #app {
   height: 100%;
+}
+.invalid-link {
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 16px;
+  color: #999;
 }
 </style>
