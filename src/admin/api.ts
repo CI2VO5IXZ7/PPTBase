@@ -32,14 +32,15 @@ interface RequestOptions {
 
 export async function api<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? 'GET'
-  const url = new URL(`/api/admin${path}`, window.location.origin)
+  // 同源相对路径，不依赖 window.location（便于 node 环境单测）
+  const url = new URL(`/api/admin${path}`, 'http://admin.local')
   for (const [k, v] of Object.entries(options.query ?? {})) {
     if (v !== undefined && v !== '') url.searchParams.set(k, v)
   }
 
   let res: Response
   try {
-    res = await fetch(url, {
+    res = await fetch(`${url.pathname}${url.search}`, {
       method,
       credentials: 'same-origin',
       headers: {

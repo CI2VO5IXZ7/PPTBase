@@ -197,8 +197,21 @@ export const useAdminStore = defineStore('admin', {
         `/users/${userId}/keys`,
         { method: 'POST', body: { label, requestId } },
       )
-      // 明文 Key 一旦返回就必须能展示：列表/概览刷新失败只降级为告警，不吞掉创建成功
-      const settled = await Promise.allSettled([this.loadKeys(), this.loadOverview(), this.loadUsers()])
+      // 明文 Key 一旦返回就必须能展示：列表/概览刷新失败只降级为告警，不吞掉创建成功。
+      // 先刷用户列表再刷 keys：选中用户在当前页外时并行 loadKeys 可能拿到旧 detail 竞态，
+      // 导致 keys 停留在旧空状态；串行后仅当详情仍是本操作用户才刷其 Key 列表。
+      const settled = await Promise.allSettled([
+        (async () => {
+          try {
+            await this.loadUsers()
+          }
+          finally {
+            // 即使用户列表刷新失败，也刷新本操作用户的 keys——创建结果必须可见
+            if (this.detailUser?.id === userId) await this.loadKeys()
+          }
+        })(),
+        this.loadOverview(),
+      ])
       const refreshFailed = settled.some(r => r.status === 'rejected')
       return { ...res, refreshFailed }
     },

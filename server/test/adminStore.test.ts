@@ -1,19 +1,18 @@
 // 前端 admin store 逻辑回归（无 UI）：筛选/分页/竞态/快照语义。
-// 通过 stub fetch + window.location.origin 在 node 环境跑真实 Pinia store。
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { setCsrfToken } from '../../src/admin/api'
 import { useAdminStore } from '../../src/admin/store'
+import type { AdminUser } from '../../src/admin/types'
 
 interface RecordedReq { url: string, method: string, body?: unknown }
 
-const USER = (id: string, status = 'active') => ({
-  id, name: `u-${id}`, note: null, status,
-  docs: 0, docsMb: 0, exportsToday: 0,
-  quotaDocs: null, quotaDocMb: null, quotaExportsPerDay: null,
-  effQuotaDocs: 100, effQuotaDocMb: 10, effQuotaExportsPerDay: 200,
-  activeKeys: 0, totalKeys: 0, createdAt: 0, lastKeyUsedAt: null,
+const USER = (id: string, status: 'active' | 'disabled' = 'active'): AdminUser => ({
+  id, name: `u-${id}`, note: null, status, createdAt: 0,
+  docs: 0, totalKeys: 0, activeKeys: 0, lastUsedAt: null, keyPrefix: null,
+  quota: { docs: 100, docMb: 10, exportsPerDay: 200 },
+  quotaCustom: { docs: null, docMb: null, exportsPerDay: null },
 })
 
 function jsonRes(body: unknown, status = 200): Response {
@@ -24,10 +23,9 @@ let requests: RecordedReq[] = []
 let handler: (req: RecordedReq) => Response | Promise<Response>
 
 beforeEach(() => {
-  (globalThis as { window?: unknown }).window = { location: { origin: 'http://admin.test' } }
   requests = []
   handler = () => jsonRes({})
-  ;(globalThis as { fetch?: unknown }).fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+  ;(globalThis as { fetch?: unknown }).fetch = (input: string | URL, init?: { method?: string, body?: unknown }) => {
     const req: RecordedReq = {
       url: typeof input === 'string' ? input : (input as URL).toString(),
       method: init?.method ?? 'GET',
@@ -41,7 +39,6 @@ beforeEach(() => {
 })
 
 afterEach(() => {
-  delete (globalThis as { window?: unknown }).window
 })
 
 describe('admin store：筛选/分页统一状态', () => {
@@ -68,7 +65,7 @@ describe('admin store：筛选/分页统一状态', () => {
 
   it('并发翻页时过期响应被丢弃，不覆盖新选择', async () => {
     const store = useAdminStore()
-    let release!: (r: Response) => void
+    let release!: () => void
     handler = req => {
       if (!req.url.includes('/users?')) return jsonRes({ keys: [] })
       if (req.url.includes('page=1')) {
@@ -110,7 +107,7 @@ describe('admin store：筛选/分页统一状态', () => {
 describe('admin store：操作快照语义', () => {
   function seedStore() {
     const store = useAdminStore()
-    store.detailUser = USER('u1') as never
+    store.detailUser = USER('u1')
     store.selectedUserId = 'u1'
     store.users = [USER('u1')] as never
     return store
@@ -132,6 +129,56 @@ describe('admin store：操作快照语义', () => {
     expect(post?.body).toMatchObject({ requestId: 'rid-1' })
     expect(res.refreshFailed).toBe(true)
     expect(res.key).toBe('pk_x') // 创建成功不被刷新失败吞掉
+  })
+
+  it('createKey：选中用户在当前页外时 keys 仍刷新为该用户新 Key 列表', async () => {
+    const store = useAdminStore()
+    // u-off 不在当前 users 页里（跨页选中/新建用户直选场景）
+    store.detailUser = USER('u-off')
+    store.selectedUserId = 'u-off'
+    store.users = [USER('p2-a'), USER('p2-b')] as never
+    store.keys = []
+    handler = req => {
+      if (req.method === 'POST' && req.url.includes('/keys')) {
+        return jsonRes({ id: 'k9', key: 'pk_x', prefix: 'pk_x', duplicated: false })
+      }
+      if (req.url.endsWith('/keys') && req.method === 'GET') {
+        const uid = req.url.match(/\/users\/([^/]+)\/keys/)?.[1]
+        if (uid !== 'u-off') return jsonRes({ keys: [] })
+        return jsonRes({ keys: [{ id: 'k9', label: 'Agent-X', prefix: 'pk_x', revokedAt: null, createdAt: 1, lastUsedAt: null }] })
+      }
+      if (req.url.includes('/overview')) return jsonRes({})
+      if (req.url.includes('/users?')) return jsonRes({ users: [USER('p2-a'), USER('p2-b')], total: 2, page: 2, pageSize: 20 })
+      return jsonRes({})
+    }
+    await store.createKey('Agent-X', 'rid-2')
+    // 页外选中用户创建后，keys 必须立即是新 Key 列表而非旧空值
+    expect(store.keys.map(k => k.label)).toEqual(['Agent-X'])
+    expect(store.detailUser?.id).toBe('u-off')
+  })
+
+  it('createKey：创建期间详情被切走则不把旧用户 keys 写入新详情', async () => {
+    const store = useAdminStore()
+    store.detailUser = USER('u-old')
+    store.selectedUserId = 'u-old'
+    store.keys = []
+    handler = req => {
+      if (req.method === 'POST' && req.url.includes('/keys')) {
+        // 模拟创建响应到达前用户已切到 u-new
+        store.detailUser = USER('u-new')
+        return jsonRes({ id: 'k9', key: 'pk_x', prefix: 'pk_x', duplicated: false })
+      }
+      if (req.url.endsWith('/keys') && req.method === 'GET') {
+        return jsonRes({ keys: [{ id: 'kX', label: 'Wrong-User-Key', prefix: 'pk_x', revokedAt: null, createdAt: 1, lastUsedAt: null }] })
+      }
+      if (req.url.includes('/overview')) return jsonRes({})
+      if (req.url.includes('/users?')) return jsonRes({ users: [USER('u-new')], total: 1, page: 1, pageSize: 20 })
+      return jsonRes({})
+    }
+    await store.createKey(null, 'rid-3')
+    expect(store.detailUser?.id).toBe('u-new')
+    // 新详情面板不应展示 u-old 的 Key
+    expect(store.keys.some(k => k.label === 'Wrong-User-Key')).toBe(false)
   })
 
   it('createUser 重置筛选/搜索并直选新用户', async () => {
