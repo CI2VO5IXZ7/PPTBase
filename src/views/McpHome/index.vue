@@ -49,11 +49,15 @@
         Key 由管理员在服务端执行 <code>docker compose exec app pptist-admin user create &lt;name&gt;</code> 发放，
         明文只显示一次，请向管理员索取并妥善保管；泄露时请管理员吊销后重发。
       </p>
+
+      <SourceAttribution class="mcp-home-footer" />
     </div>
   </div>
 </template>
 
 <script lang="ts" setup>
+import SourceAttribution from '@/components/SourceAttribution.vue'
+
 const mcpEndpoint = `${window.location.origin}/mcp`
 </script>
 
@@ -128,4 +132,10 @@ ol {
 p {
   margin: 0;
 }
+.mcp-home-footer {
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid #eee;
+}
+
 </style>

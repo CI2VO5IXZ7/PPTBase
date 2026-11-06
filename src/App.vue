@@ -20,7 +20,6 @@ import { LOCALSTORAGE_KEY_DISCARDED_DB } from '@/configs/storage'
 import { deleteDiscardedDB } from '@/utils/database'
 import { isPC } from '@/utils/common'
 import useDocumentSync from '@/hooks/useDocumentSync'
-import api from '@/services'
 
 import { isMcpHomeEntry } from '@/utils/entry'
 import Editor from './views/Editor/index.vue'
@@ -95,13 +94,9 @@ onMounted(async () => {
     snapshotStore.initSnapshotDatabase()
   }
   else if (!isMcpHome) {
-    const slides = await api.getMockData('slides')
-    slidesStore.setSlides(slides)
-
-    await deleteDiscardedDB()
-    snapshotStore.initSnapshotDatabase()
+    // 无 doc 且非 MCP 说明页：没有可加载的内容
+    loadFailed.value = true
   }
-  // isMcpHome 只渲染说明页：不初始化编辑器、不加载 mocks、不建快照库
 })
 
 // 应用注销时向 localStorage 中记录下本次 indexedDB 的数据库ID，用于之后清除数据库

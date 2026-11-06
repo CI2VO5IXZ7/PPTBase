@@ -37,9 +37,6 @@ export interface MainState {
   showSearchPanel: boolean
   showNotesPanel: boolean
   showSymbolPanel: boolean
-  showMarkupPanel: boolean
-  showImageLibPanel: boolean
-  showAIPPTDialog: boolean | 'running'
 }
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')
@@ -76,9 +73,6 @@ export const useMainStore = defineStore('main', {
     showSearchPanel: false, // 打开查找替换面板
     showNotesPanel: false, // 打开批注面板
     showSymbolPanel: false, // 打开符号面板
-    showMarkupPanel: false, // 打开类型标注面板
-    showImageLibPanel: false, // 打开图片库面板
-    showAIPPTDialog: false, // 打开AIPPT创建窗口
   }),
 
   getters: {
@@ -213,16 +207,5 @@ export const useMainStore = defineStore('main', {
       this.showSymbolPanel = show
     },
 
-    setMarkupPanelState(show: boolean) {
-      this.showMarkupPanel = show
-    },
-
-    setImageLibPanelState(show: boolean) {
-      this.showImageLibPanel = show
-    },
-
-    setAIPPTDialogState(show: boolean | 'running') {
-      this.showAIPPTDialog = show
-    },
   },
 })

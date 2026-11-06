@@ -1,100 +1,106 @@
-<p align="center">
-    <img src='/public/logo.png' />
-</p>
+# PPTist
 
-[简体中文](README_zh.md) | English
+面向 AI Agent 的在线演示文稿服务：Agent 通过远程 MCP 创建和修改演示文稿，用户在网页端查看与协作编辑，服务端可导出 PPTX / PDF / 图片。
 
-# PPTist — Agent-oriented multi-user fork
+## 代码来源与许可
 
-**This repository is a fork of [pipipi-pikachu/PPTist](https://github.com/pipipi-pikachu/PPTist).** It keeps the upstream Vue 3 + TypeScript web editor and adds a self-hosted backend (`server/`) built for AI-agent workflows: multi-user API keys, server-side document storage, a remote MCP endpoint, server-side export, and an admin console. This fork is not affiliated with or endorsed by upstream, and its changes have not been merged upstream.
+本项目的**渲染、在线编辑、放映和浏览器端导出**基于 [PPTist](https://github.com/pipipi-pikachu/PPTist)（作者 [pipipi-pikachu](https://github.com/pipipi-pikachu)，AGPL-3.0），上游基线提交 `a8fcb4d`。在此基础上新增了多用户服务端、MCP、协作同步与管理台。
 
-## What this fork adds
+| 类别 | 范围 |
+|---|---|
+| 来自上游（未改动） | `src/views/Screen/**`、`src/views/Mobile/**`（除 `MobilePreview.vue`）、`src/views/components/**`、`src/components/**`（除 `SourceAttribution.vue`）、`src/hooks/**`（除 `useDocumentSync.ts`）、`src/store/**`（除 `document.ts`）、`src/utils/**`（除 `entry.ts` 与 `__tests__/`）、`src/configs/**`（除 `collab.ts`）、`src/types/**`、`src/assets/**`、`src/directive/**`、`public/`（`favicon.ico`、`logo.png`） |
+| 在上游基础上修改 | `src/App.vue`、`src/hooks/useExport.ts`、`src/hooks/useSlideHandler.ts`、`src/hooks/usePasteDataTransfer.ts`、`src/store/index.ts`、`src/store/main.ts`、`src/store/slides.ts`、`src/types/export.ts`、`src/types/slides.ts`、`src/utils/prosemirror/commands/replaceText.ts`、`src/views/Editor/index.vue`、`src/views/Editor/EditorHeader/index.vue`、`src/views/Editor/CanvasTool/index.vue`、`src/views/Editor/Thumbnails/index.vue`、`src/views/Editor/Toolbar/common/RichTextBase.vue`、`src/views/Editor/ExportDialog/index.vue`、`src/views/Mobile/MobilePreview.vue`、`vite.config.ts`、`env.d.ts`、`index.html`、`package.json`、`components.d.ts` |
+| 本项目新增 | `server/**`、`src/admin/**`、`src/views/ExportRuntime`、`src/views/Viewer`、`src/views/McpHome`、`src/hooks/useDocumentSync.ts`、`src/services/document.ts`、`src/store/document.ts`、`src/components/SourceAttribution.vue`、`src/configs/collab.ts`、`src/utils/entry.ts`、`src/utils/__tests__/`、`doc/AI_PPT_SCHEMA.md`、`admin.html`、`Dockerfile`、`docker-compose.yml`、`Caddyfile`、`.dockerignore` |
 
-Implemented under `server/` (Fastify + better-sqlite3) unless noted:
+相比上游基线，本项目删除了未使用的上游功能代码：AIPPT、AI 文本改写、在线图库、幻灯片类型标注、模板库与模板 mocks、全部文件导入（PPTX / JSON / `.pptist`）及 `.pptist` 专属导出、`public/mocks` 示例数据等；完整清单见 git 历史。
 
-- **Multi-user isolation**: each user owns their documents; access is authenticated per request.
-- **Credentials**: user API keys (`pk_…`) for agents and the REST API, plus per-document edit / read-only tokens (`X-Doc-Token` header, `#t=` URL hash) for the web client. Keys are shown only once at creation; admin surfaces only ever display key prefixes.
-- **Quotas and storage**: per-user quotas (document count, document size, exports per day). Documents, revisions, uploaded assets and export files live under `DATA_DIR` — SQLite `app.db` (WAL), `assets/`, `exports/`.
-- **Collaboration**: versioned documents with three-way merge on `baseVersion` (conflicts return 409), SSE push (`GET /api/docs/:id/events`), comments/notes.
-- **Remote MCP**: `POST /mcp` (Streamable HTTP, stateless) exposes tools for creating, editing and exporting presentations — `create_presentation`, `add_slides`, `update_elements`, `batch_edit`, `get_changes`, `export_presentation`, and more; `get_authoring_guide` serves the authoring schema (`doc/AI_PPT_SCHEMA.md`) in sections.
-- **Server-side export**: headless Chromium (Playwright) renders PPTX / PDF / PNG via the app's own export runtime; JSON export does not use a browser.
-- **Admin**: standalone `/admin` console (separate Vite entry `admin.html`, Vue 3 + Naive UI) plus the `pptist-admin` CLI for users, keys, quotas and online SQLite backups.
-- **Agent landing page**: visiting `/` without a `doc` parameter shows an MCP integration guide for agents instead of the editor (`src/views/McpHome`).
+第三方参考（沿用上游源码注释中的说明）：hfmath（[LingDong-/hfmath](https://github.com/LingDong-/hfmath)，上游 fork 后做了扩展）、himalaya（`src/utils/htmlParser`）、svg64（`src/utils/svg2Base64.ts`）。
 
-## Upstream editor (unchanged core)
+## 功能
 
-- Vue 3 + TypeScript, no UI component library dependency
-- Common Office PPT elements: text, image, shape, line, chart, table, video, audio, formula
-- Slide/page editing, transitions and element animations, slideshow tools, basic mobile editing and preview
-- Browser-side PPTX / JSON / image / PDF import & export
-- Upstream's own online demo (hosted by upstream, not this fork): <https://pipipi-pikachu.github.io/PPTist/>
+服务端（`server/`，Fastify + better-sqlite3）：
 
-## Document links
+- **多用户隔离**：每个用户只拥有自己的文档，所有访问按请求鉴权。
+- **凭证体系**：用户 API Key（`pk_…`，供 Agent 与 REST API 使用）+ 每文档的编辑/只读令牌（`X-Doc-Token` 请求头、URL `#t=` hash，供网页端使用）。Key 只在创建时显示一次，管理端永远只显示 Key 前缀。
+- **配额与存储**：按用户配额（文档数、单文档大小、每日导出次数）。文档、修订、上传资产与导出文件全部放在 `DATA_DIR`——SQLite `app.db`（WAL）、`assets/`、`exports/`。
+- **协作**：文档带版本号，写入基于 `baseVersion` 三方合并（冲突返回 409），SSE 推送（`GET /api/docs/:id/events`），批注/评论。
+- **远程 MCP**：`POST /mcp`（Streamable HTTP，无状态）提供创建、编辑、导出演示文稿的工具——`create_presentation`、`add_slides`、`update_elements`、`batch_edit`、`get_changes`、`export_presentation` 等；`get_authoring_guide` 分段返回编写规范（`doc/AI_PPT_SCHEMA.md`）。
+- **服务端导出**：无头 Chromium（Playwright）复用前端导出运行时渲染 PPTX / PDF / PNG；JSON 导出不走浏览器。
+- **管理端**：独立的 `/admin` 管理台（单独的 Vite 入口 `admin.html`，Vue 3 + Naive UI）+ `pptist-admin` CLI，覆盖用户、Key、配额与 SQLite 在线备份。
+- **Agent 说明页**：不带 `doc` 参数访问根路径 `/` 时，显示面向 Agent 的 MCP 接入说明页而非编辑器（`src/views/McpHome`）。
 
-- Edit link: `https://<your-host>/?doc=<docId>#t=<edit-token>`
-- Read-only link: `https://<your-host>/?doc=<docId>&mode=view#t=<view-token>`
-- `/` without `doc` → MCP guide page; `?mode=export` is the headless export runtime used internally by the server.
+编辑器（来自上游）：
 
-## Quick start
+- Vue 3 + TypeScript 构建
+- 常用 Office PPT 元素：文字、图片、形状、线条、图表、表格、视频、音频、公式
+- 幻灯片页面编辑、翻页与元素动画、放映工具（含演讲者/观众视图）、移动端基础编辑与预览
+- 浏览器端 PPTX / JSON / 图片 / PDF 导出
 
-### Local development (Node.js >= 20)
+## 文档链接
+
+- 编辑链接：`https://<你的域名>/?doc=<docId>#t=<编辑令牌>`
+- 只读链接：`https://<你的域名>/?doc=<docId>&mode=view#t=<只读令牌>`
+- 不带 `doc` 的 `/` → MCP 说明页；`?mode=export` 是服务端内部使用的无头导出运行时。
+
+## 快速开始
+
+### 本地开发（Node.js >= 20）
 
 ```bash
-# frontend — Vite dev server at http://127.0.0.1:5173, proxies /api /assets /exports /mcp to :3100
+# 前端 —— Vite 开发服务器 http://127.0.0.1:5173，把 /api /assets /exports /mcp 代理到 :3100
 npm install
 npm run dev
 
-# backend — http://0.0.0.0:3100
+# 后端 —— http://0.0.0.0:3100
 npm --prefix server install
 npm --prefix server run dev
 ```
 
-### Self-host with Docker Compose (image includes Chromium)
+### Docker Compose 自托管（镜像自带 Chromium）
 
 ```bash
 mkdir -p data
-chown 1001:1001 data    # writable by the Playwright image non-root user (pwuser)
-docker compose up -d     # app only, http://127.0.0.1:3100
+chown 1001:1001 data    # Playwright 镜像中非 root 用户 pwuser 可写
+docker compose up -d     # 仅 app，http://127.0.0.1:3100
 curl http://127.0.0.1:3100/api/health
 
-docker compose exec app pptist-admin user create alice   # replace alice; prints the pk_ key once
+docker compose exec app pptist-admin user create alice   # alice 可替换；pk_ Key 只显示这一次
 ```
 
-`docker compose --profile https up -d` additionally starts Caddy for automatic HTTPS — first set your real domain in `Caddyfile` and `PUBLIC_BASE_URL` in `docker-compose.yml`. The `https` profile is off by default; a plain `docker compose up -d` only starts the app. Full deployment notes: [server/README.md](server/README.md).
+`docker compose --profile https up -d` 会额外启动 Caddy 自动签发 HTTPS——先把 `Caddyfile` 里的域名和 `docker-compose.yml` 里的 `PUBLIC_BASE_URL` 改成你的真实域名。`https` profile 默认不启用，普通 `docker compose up -d` 只起 app。完整部署说明见 [server/README.md](server/README.md)。
 
-### Connect an agent (remote MCP)
+### 接入 Agent（远程 MCP）
 
 ```yaml
 mcp_servers:
   pptist:
-    url: https://pptist.example.com/mcp   # replace with your deployment's public URL
+    url: https://pptist.example.com/mcp   # 换成你部署的公网地址
     headers:
-      Authorization: Bearer pk_...        # a real key is issued by pptist-admin, shown once
+      Authorization: Bearer pk_...        # 真实 Key 由 pptist-admin 签发，只显示一次
 ```
 
-### Admin console
+### 管理台
 
-- Set the first admin password via the `ADMIN_INITIAL_PASSWORD` environment variable (≥10 chars, only seeds when the database has none) or with `pptist-admin passwd`.
-- Entry: `GET /admin` in production; `http://localhost:5173/admin.html` under Vite dev.
+- 首次管理员密码：用 `ADMIN_INITIAL_PASSWORD` 环境变量（≥10 字符，仅在库里还没有密码时播种），或执行 `pptist-admin passwd`。
+- 宿主不方便调整目录权限时，可把 Compose 的 data 绑定挂载改为 Docker named volume（卷名如 `pptist-data`），不要以 root 运行应用。
+- 入口：生产 `GET /admin`；Vite 开发模式下 `http://localhost:5173/admin.html`。
 
-## Operations notes
+## 运维提示
 
-- Serve over HTTPS in production; `ADMIN_SECURE_COOKIES` is derived from `PUBLIC_BASE_URL`. Set `TRUST_PROXY=1` only behind a trusted reverse proxy.
-- Keep secrets, user keys and the `data/` directory out of git — `.env*` files are git-ignored; `server/.env.example` lists the supported variables with placeholders only.
-- `pptist-admin backup <file>` performs an online SQLite backup. Backup scheduling and off-site copies are left to the deployer; nothing is scheduled automatically.
+- 生产请走 HTTPS；`ADMIN_SECURE_COOKIES` 依据 `PUBLIC_BASE_URL` 自动判定。仅在可信反代之后设置 `TRUST_PROXY=1`。
+- 密钥、用户 Key、`data/` 目录一律不入库——`.env*` 已被 git 忽略，`server/.env.example` 只含占位符。
+- `pptist-admin backup <文件>` 可做 SQLite 在线备份；备份计划与异地拷贝由部署者按需自行安排，仓库不自带任何自动备份任务。
 
-## Documentation
+## 文档
 
-- Server: environment variables, `pptist-admin` CLI, REST/MCP API reference, deployment — [server/README.md](server/README.md)
-- Upstream development docs — [doc/](doc/) (project structure & data schema, canvas, custom elements, AIPPT)
+- 服务端：环境变量、`pptist-admin` CLI、REST/MCP API、部署 —— [server/README.md](server/README.md)
+- 页面数据编写规范（Agent 编写 PPT 内容时遵循） —— [doc/AI_PPT_SCHEMA.md](doc/AI_PPT_SCHEMA.md)
 
-## Issues
+## 许可证
 
-- Bugs or feature requests about this fork (server, MCP, admin, deployment) → [Issues in this repository](https://github.com/CI2VO5IXZ7/PPTist/issues)
-- Bugs in the upstream editor → [pipipi-pikachu/PPTist Issues](https://github.com/pipipi-pikachu/PPTist/issues)
+[AGPL-3.0](LICENSE)
 
-## License
+Copyright © 2020-PRESENT [pipipi-pikachu](https://github.com/pipipi-pikachu)（上游编辑器及其衍生部分）
+Copyright © 2026 CI2VO5IXZ7（本项目新增的服务端、MCP、管理台等部分）
 
-[AGPL-3.0](LICENSE) | Copyright © 2020-PRESENT [pipipi-pikachu](https://github.com/pipipi-pikachu)
-
-AGPL-3.0 covers the whole repository including this fork's additions: if you modify the code and let others interact with it over a network, you must publish the complete corresponding source under AGPL-3.0, keep copyright notices intact, and may not add further restrictions. The upstream author separately offers independent commercial licenses — see the upstream README for terms and contact details. This fork is not an official upstream product.
+AGPL-3.0 覆盖整个仓库：如果你修改了代码并通过网络提供给他人使用（例如把本服务作为在线服务开放），必须以 AGPL-3.0 完整公开对应源码、保留版权声明、不得附加额外限制。

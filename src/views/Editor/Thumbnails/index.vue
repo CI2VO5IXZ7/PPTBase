@@ -6,15 +6,6 @@
   >
     <div class="add-slide">
       <div class="btn" @click="createSlide()"><i-icon-park-outline:plus class="icon" />添加幻灯片</div>
-      <Popover trigger="click" placement="bottom-start" v-model:value="presetLayoutPopoverVisible" center>
-        <template #content>
-          <Templates 
-            @select="slide => { createSlideByTemplate(slide); presetLayoutPopoverVisible = false }"
-            @selectAll="({ slides, theme }) => { insertAllTemplates({ slides, theme }); presetLayoutPopoverVisible = false }"
-          />
-        </template>
-        <div class="select-btn"><i-icon-park-outline:down /></div>
-      </Popover>
     </div>
 
     <Draggable 
@@ -77,7 +68,6 @@
 import { computed, nextTick, ref, watch, useTemplateRef } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMainStore, useSlidesStore, useKeyboardStore } from '@/store'
-import type { Slide, SlideTheme } from '@/types/slides'
 import { fillDigit } from '@/utils/common'
 import { isElementInViewport } from '@/utils/element'
 import type { ContextmenuItem } from '@/components/Contextmenu/types'
@@ -85,11 +75,8 @@ import useSlideHandler from '@/hooks/useSlideHandler'
 import useSectionHandler from '@/hooks/useSectionHandler'
 import useScreening from '@/hooks/useScreening'
 import useLoadSlides from '@/hooks/useLoadSlides'
-import useAddSlidesOrElements from '@/hooks/useAddSlidesOrElements'
 
 import ThumbnailSlide from '@/views/components/ThumbnailSlide/index.vue'
-import Templates from './Templates.vue'
-import Popover from '@/components/Popover.vue'
 import Draggable from 'vuedraggable'
 
 const mainStore = useMainStore()
@@ -103,25 +90,19 @@ const { slidesLoadLimit } = useLoadSlides()
 
 const selectedSlidesIndex = computed(() => [..._selectedSlidesIndex.value, slideIndex.value])
 
-const presetLayoutPopoverVisible = ref(false)
-
 const hasSection = computed(() => {
   return slides.value.some(item => item.sectionTag)
 })
-
-const { addSlidesFromData } = useAddSlidesOrElements()
 
 const {
   copySlide,
   pasteSlide,
   createSlide,
-  createSlideByTemplate,
   copyAndPasteSlide,
   deleteSlide,
   cutSlide,
   selectAllSlide,
   sortSlides,
-  isEmptySlide,
 } = useSlideHandler()
 
 const {
@@ -250,11 +231,6 @@ const saveSection = (e: FocusEvent | KeyboardEvent) => {
 
   editingSectionId.value = ''
   mainStore.setDisableHotkeysState(false)
-}
-
-const insertAllTemplates = ({ slides, theme }: { slides: Slide[], theme: Partial<SlideTheme> }) => {
-  if (isEmptySlide.value) slidesStore.setSlides(slides, theme)
-  else addSlidesFromData(slides)
 }
 
 const contextmenusSection = (el: HTMLElement): ContextmenuItem[] => {
@@ -389,19 +365,6 @@ const contextmenusThumbnailItem = (): ContextmenuItem[] => {
       background-color: $lightGray;
     }
   }
-  .select-btn {
-    width: 30px;
-    height: 100%;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    border-left: 1px solid $borderColor;
-
-    &:hover {
-      background-color: $lightGray;
-    }
-  }
-
   .icon {
     margin-right: 3px;
     font-size: 12px;

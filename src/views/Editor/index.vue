@@ -14,14 +14,13 @@
       </div>
       <Toolbar class="layout-content-right" />
     </div>
+    <SourceAttribution class="layout-footer" />
   </div>
 
   <SelectPanel v-if="showSelectPanel" />
   <SearchPanel v-if="showSearchPanel" />
   <NotesPanel v-if="showNotesPanel" />
-  <MarkupPanel v-if="showMarkupPanel" />
   <SymbolPanel v-if="showSymbolPanel" />
-  <ImageLibPanel v-if="showImageLibPanel" />
   <ChartDataEditorDialog />
   <LatexEditorDialog />
 
@@ -32,26 +31,12 @@
   >
     <ExportDialog />
   </Modal>
-
-  <Modal
-    v-if="ENABLE_AI"
-    :visible="!!showAIPPTDialog" 
-    :width="720"
-    :closeOnClickMask="false"
-    :closeOnEsc="false"
-    closeButton
-    :wrapStyle="{ opacity: showAIPPTDialog === 'running' ? 0 : 1 }"
-    @closed="closeAIPPTDialog()"
-  >
-    <AIPPTDialog />
-  </Modal>
 </template>
 
 <script lang="ts" setup>
 import { ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMainStore } from '@/store'
-import { ENABLE_AI } from '@/configs/collab'
 import useGlobalHotkey from '@/hooks/useGlobalHotkey'
 import usePasteEvent from '@/hooks/usePasteEvent'
 
@@ -68,10 +53,8 @@ import SelectPanel from './SelectPanel.vue'
 import SearchPanel from './SearchPanel.vue'
 import NotesPanel from './NotesPanel.vue'
 import SymbolPanel from './SymbolPanel.vue'
-import MarkupPanel from './MarkupPanel.vue'
-import ImageLibPanel from './ImageLibPanel.vue'
-import AIPPTDialog from './AIPPTDialog.vue'
 import Modal from '@/components/Modal.vue'
+import SourceAttribution from '@/components/SourceAttribution.vue'
 
 const mainStore = useMainStore()
 const {
@@ -80,14 +63,9 @@ const {
   showSearchPanel,
   showNotesPanel,
   showSymbolPanel,
-  showMarkupPanel,
-  showImageLibPanel,
-  showAIPPTDialog,
 } = storeToRefs(mainStore)
 
 const closeExportDialog = () => mainStore.setDialogForExport('')
-const closeAIPPTDialog = () => mainStore.setAIPPTDialogState(false)
-
 const remarkHeight = ref(40)
 
 useGlobalHotkey()
@@ -102,7 +80,7 @@ usePasteEvent()
   height: 40px;
 }
 .layout-content {
-  height: calc(100% - 40px);
+  height: calc(100% - 60px);
   display: flex;
 }
 .layout-content-left {
@@ -120,5 +98,8 @@ usePasteEvent()
 .layout-content-right {
   width: 260px;
   height: 100%;
+}
+.layout-footer {
+  height: 20px;
 }
 </style>
