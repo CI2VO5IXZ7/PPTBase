@@ -10,9 +10,21 @@
       </select>
     </div>
     <button v-if="!readonly" class="new-btn" @click="addDocComment">＋ 文档级批注</button>
+
+    <div v-if="submissions?.length" class="submissions">
+      <div class="sub-head">反馈历史</div>
+      <div v-for="s in submissions" :key="s.id" class="sub-item">
+        <span class="round">第 {{ s.round }} 轮</span>
+        <span class="v">v{{ s.version }}/c{{ s.contentVersion }}</span>
+        <span :class="['status', s.status]">{{ statusText[s.status] }}</span>
+        <span v-if="s.result?.completedAt" class="done-note">{{ s.result.note || '已标记处理完成' }}</span>
+      </div>
+    </div>
+
     <div class="threads">
       <div v-for="t in filtered" :key="t.id" :class="['thread', t.status, { detached: t.detached }]">
-        <div class="anchor-desc">{{ anchorDesc(t) }}</div>
+        <div class="anchor-desc" @click="$emit('locate', t)">{{ anchorDesc(t) }}</div>
+        <div v-if="t.detached" class="quote">引用原文：{{ t.anchor.quote?.text ?? '（无）' }}</div>
         <div v-for="c in t.messages" :key="c.id" class="comment">
           <div class="meta">{{ c.author === 'agent' ? 'Agent' : '用户' }} · {{ formatTime(c.createdAt) }}</div>
           <div class="body">{{ c.content }}</div>
@@ -30,15 +42,18 @@
 
 <script lang="ts" setup>
 import { computed, reactive, ref } from 'vue'
-import type { OutlineThread } from '@/types/outline'
+import type { OutlineSubmission, OutlineThread } from '@/types/outline'
 
-const props = defineProps<{ threads: OutlineThread[], readonly: boolean }>()
-const emit = defineEmits<{ op: [op: Record<string, unknown>] }>()
+const props = defineProps<{ threads: OutlineThread[], submissions?: OutlineSubmission[], readonly: boolean }>()
+const emit = defineEmits<{ op: [op: Record<string, unknown>], locate: [thread: OutlineThread] }>()
 
 const filter = ref('all')
 const replies = reactive<Record<string, string>>({})
 
-const filtered = computed(() => props.threads.filter(t => filter.value === 'all' || (filter.value === 'detached' ? t.detached : !t.detached && t.status === filter.value)))
+const statusText: Record<string, string> = { pending: '待处理', handled: '已处理', superseded: '已被新一轮取代' }
+
+const filtered = computed(() => props.threads.filter(t =>
+  filter.value === 'all' || (filter.value === 'detached' ? t.detached : !t.detached && t.status === filter.value)))
 
 const anchorDesc = (t: OutlineThread) => {
   const a = t.anchor
@@ -60,10 +75,8 @@ const reply = (t: OutlineThread) => {
   emit('op', { op: 'replyComment', threadId: t.id, content: text })
   replies[t.id] = ''
 }
-
 const setStatus = (t: OutlineThread, status: 'resolved' | 'open') =>
   emit('op', { op: 'setThreadStatus', threadId: t.id, status })
-
 const addDocComment = () => {
   const content = window.prompt('批注内容')
   if (!content) return
@@ -76,12 +89,23 @@ const addDocComment = () => {
 .panel-head { padding: 10px 12px; border-bottom: 1px solid #e5e5e5; display: flex; justify-content: space-between; align-items: center; font-size: 14px; font-weight: 600; }
 .filter { font-size: 12px; }
 .new-btn { margin: 10px 12px 0; font-size: 12px; padding: 4px 8px; border: 1px dashed #d4d4d4; border-radius: 4px; background: #fff; cursor: pointer; }
+.submissions { padding: 8px 12px; border-bottom: 1px solid #eee; font-size: 12px; }
+.sub-head { font-weight: 600; margin-bottom: 4px; }
+.sub-item { display: flex; gap: 6px; align-items: center; padding: 2px 0; flex-wrap: wrap;
+  .round { font-weight: 600; }
+  .v { color: #888; }
+  .status.pending { color: #d97706; }
+  .status.handled { color: #059669; }
+  .status.superseded { color: #9ca3af; }
+  .done-note { color: #666; }
+}
 .threads { flex: 1; overflow-y: auto; padding: 10px; }
 .thread { border: 1px solid #e5e5e5; border-radius: 6px; padding: 8px; margin-bottom: 8px; font-size: 13px;
   &.resolved { opacity: 0.7; }
   &.detached { border-style: dashed; }
 }
-.anchor-desc { font-size: 11px; color: #888; margin-bottom: 6px; }
+.anchor-desc { font-size: 11px; color: #2563eb; margin-bottom: 6px; cursor: pointer; }
+.quote { font-size: 11px; color: #888; border-left: 2px solid #d4d4d4; padding-left: 6px; margin-bottom: 6px; }
 .comment .meta { font-size: 11px; color: #888; }
 .comment .body { margin: 2px 0 6px; }
 .reply { width: 100%; font-size: 12px; padding: 4px 6px; border: 1px solid #e5e5e5; border-radius: 4px; margin-top: 4px; }

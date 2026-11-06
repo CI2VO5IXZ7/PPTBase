@@ -29,7 +29,7 @@
         <li><code>create_presentation</code> 创建文档</li>
         <li>把返回的 <code>editUrl</code> 发给用户（网页端可直接编辑，<code>viewUrl</code> 为只读）</li>
         <li><code>get_changes</code> 查看用户在网页端的修改</li>
-        <li>（推荐）先 <code>create_outline</code> 写大纲 → 发 <code>outlineEditUrl</code> 给用户 → <code>get_outline_feedback</code> 读反馈 → <code>edit_outline</code> 改稿 → 用户确认后 <code>begin_presentation_from_outline</code>，后续写页面工具带 <code>sourceApprovalId</code></li>
+        <li>（推荐大纲流程）<code>create_outline</code> 建大纲（返回 <code>outlineEditUrl</code>/<code>outlineViewUrl</code> 发给用户）→ 用户网页编辑批注后点「提交反馈」→ <code>get_outline_feedback</code> 按轮次读快照 → <code>edit_outline</code> 改稿 → <code>complete_outline_feedback</code> 标记该轮完成 → 用户点「确认大纲」后 <code>begin_presentation_from_outline</code> 取制作来源，后续写页面工具一律带 <code>sourceApprovalId</code></li>
         <li><code>export_presentation</code> 导出为 pptx / pdf / png / json</li>
       </ol>
 
@@ -43,6 +43,7 @@
           <tr><td>协作</td><td><code>get_changes</code> <code>list_comments</code> <code>add_comment</code> <code>reply_comment</code></td></tr>
           <tr><td>素材</td><td><code>upload_image</code>（外链或 base64 转存，返回可写入 <code>image.src</code> 的地址）</td></tr>
           <tr><td>导出</td><td><code>render_slide</code> <code>export_presentation</code> <code>get_export</code></td></tr>
+          <tr><td colspan="2" class="notes">大纲要点：提交反馈/确认不会唤醒 Agent，用户在对话中继续找你才处理；确认稿固定 contentVersion，正文/图片变化后旧来源失效需重新确认；批注不影响确认；大纲图片为 <code>/assets/</code> 不可猜测地址，仅被引用的本人资产可读。</td></tr>
         </tbody>
       </table>
 

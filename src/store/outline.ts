@@ -1,6 +1,6 @@
 // 大纲工作区状态：与 PPT version 完全分离
 import { defineStore } from 'pinia'
-import type { OutlineThread } from '@/types/outline'
+import type { OutlineSubmission, OutlineThread } from '@/types/outline'
 import type { OutlineState } from '@/services/outline'
 
 export type OutlineSaveStatus = 'saved' | 'saving' | 'dirty' | 'offline' | 'conflict'
@@ -14,9 +14,12 @@ export interface OutlineStoreState {
   threads: OutlineThread[]
   status: OutlineState['status'] | null
   saveStatus: OutlineSaveStatus
-  // 冲突/失败时保留的本地未提交 steps，供用户恢复
-  pendingSteps: Record<string, unknown>[]
-  conflictRemote: { version: number } | null
+  // 冲突时保留的本地草稿（正文快照 + 未提交 steps），用户显式取回/放弃前不清空
+  localDraft: { content: Record<string, unknown>, steps: Record<string, unknown>[], savedAt: number } | null
+  conflictRemote: { version: number, contentVersion: number } | null
+  // 反馈提交历史（GET /feedback 拉取）
+  submissions: OutlineSubmission[]
+  uploadsPending: number
   lastError: string
 }
 
@@ -30,8 +33,10 @@ export const useOutlineStore = defineStore('outline', {
     threads: [],
     status: null,
     saveStatus: 'saved',
-    pendingSteps: [],
+    localDraft: null,
     conflictRemote: null,
+    submissions: [],
+    uploadsPending: 0,
     lastError: '',
   }),
   getters: {
@@ -65,16 +70,22 @@ export const useOutlineStore = defineStore('outline', {
     setSaveStatus(status: OutlineSaveStatus) {
       this.saveStatus = status
     },
-    queueSteps(steps: Record<string, unknown>[]) {
-      this.pendingSteps.push(...steps)
-      if (this.saveStatus === 'saved') this.saveStatus = 'dirty'
+    setSubmissions(submissions: OutlineSubmission[]) {
+      this.submissions = submissions
     },
-    clearPending(count: number) {
-      this.pendingSteps.splice(0, count)
+    setUploadsPending(n: number) {
+      this.uploadsPending = n
     },
-    setConflict(remoteVersion: number) {
+    // 冲突保护：保存本地正文与未提交 steps；任何时刻可显式取回/放弃
+    stashDraft(content: Record<string, unknown>, steps: Record<string, unknown>[]) {
+      this.localDraft = { content, steps, savedAt: Date.now() }
+    },
+    dropDraft() {
+      this.localDraft = null
+    },
+    setConflict(remoteVersion: number, contentVersion: number) {
       this.saveStatus = 'conflict'
-      this.conflictRemote = { version: remoteVersion }
+      this.conflictRemote = { version: remoteVersion, contentVersion }
     },
   },
 })

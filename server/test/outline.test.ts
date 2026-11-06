@@ -997,3 +997,60 @@ describe('制作门禁：Agent 写页面必须携带有效确认来源', () => {
     expect(res.statusCode).toBe(400)
   })
 })
+
+describe('边界回归：replaceBlock 子树批注歧义 + requestId 边界', () => {
+  it('replaceBlock 后同批对被替换子树内区块加批注 → 拒绝歧义混合批', async () => {
+    const { doc } = await docWithOutline()
+    const token = editTokenOf(ctx, doc.docId)
+    // 建一个含子区块的列表：list_item 有自己的 blockId
+    const list = {
+      type: 'bullet_list', attrs: { blockId: 'L1' },
+      content: [{ type: 'list_item', attrs: { blockId: 'I1' }, content: [{ type: 'paragraph', attrs: { blockId: 'P1' }, content: [{ type: 'text', text: 'x' }] }] }],
+    }
+    const cur = (await getOutline(auth(alice.key), doc.docId)).json()
+    const ins = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: cur.version, ops: [{ op: 'insertBlocks', blocks: [list] }] },
+    })
+    expect(ins.statusCode).toBe(200)
+    const v = ins.json().version
+
+    // 同批：替换整个列表 + 对子项 I1 加批注 → 必须拒绝（锚点目标已被替换删除）
+    const mixed = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: {
+        baseVersion: v,
+        ops: [
+          { op: 'replaceBlock', blockId: 'L1', block: { type: 'paragraph', attrs: { blockId: 'P2' }, content: [{ type: 'text', text: 'replaced' }] } },
+          { op: 'addComment', anchor: { kind: 'block', blockId: 'I1' }, content: 'ambiguous' },
+        ],
+      },
+    })
+    expect(mixed.statusCode).toBe(400)
+    expect(mixed.json().message).toContain('修改')
+  })
+
+  it('generation requestId 长度边界：128 通过，129 拒绝', async () => {
+    const { doc } = await docWithOutline()
+    const token = editTokenOf(ctx, doc.docId)
+    const state = (await getOutline(auth(alice.key), doc.docId)).json()
+    await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: state.version, acknowledgeOpenThreads: true },
+    })
+    const bad = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/generation`,
+      headers: auth(alice.key), payload: { requestId: 'x'.repeat(129) },
+    })
+    expect(bad.statusCode).toBe(400)
+    const ok = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/generation`,
+      headers: auth(alice.key), payload: { requestId: 'y'.repeat(128) },
+    })
+    expect(ok.statusCode).toBe(200)
+    expect(ok.json().approvalId).toBeTruthy()
+  })
+})

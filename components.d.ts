@@ -56,6 +56,7 @@ declare module 'vue' {
     'IIconParkOutline:down': typeof import('~icons/icon-park-outline/down')['default']
     'IIconParkOutline:download': typeof import('~icons/icon-park-outline/download')['default']
     'IIconParkOutline:edit': typeof import('~icons/icon-park-outline/edit')['default']
+    'IIconParkOutline:editTwo': typeof import('~icons/icon-park-outline/edit-two')['default']
     'IIconParkOutline:effects': typeof import('~icons/icon-park-outline/effects')['default']
     'IIconParkOutline:erase': typeof import('~icons/icon-park-outline/erase')['default']
     'IIconParkOutline:fill': typeof import('~icons/icon-park-outline/fill')['default']

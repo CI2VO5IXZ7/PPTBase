@@ -7,13 +7,13 @@ import { join } from 'node:path'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
-import type { DocAccess } from '../auth'
+import { outlineLinks, type DocAccess } from '../auth'
 import type { AppConfig } from '../config'
 import type { AssetRow, Db, DocumentRow } from '../db'
 import { AppError } from '../errors'
 import { outlineOpsSchema, parseBody, type OutlineOpsBody } from '../outline/schema'
 import type { OutlineService } from '../outline/service'
-import { readableText } from '../../../src/utils/outline/serialize'
+import { assetManifest, readableText } from '../../../src/utils/outline/serialize'
 import { outlineSchema } from '../../../src/utils/outline/schema'
 
 interface OutlineMcpCtx {
@@ -113,9 +113,13 @@ export function registerOutlineTools(server: McpServer, ctx: OutlineMcpCtx): voi
       content: z.looseObject({ type: z.literal('doc') }).optional().describe('初始正文（受限 PM JSON），不传创建空段落'),
     },
   }, call(({ docId, requestId, content }: { docId: string, requestId?: string, content?: { type: 'doc' } }) => {
-    const { access } = ownDoc(docId)
+    const { access, row } = ownDoc(docId)
     const result = outline.init(access, docId, { requestId, content })
-    return { docId, existing: result.existing, version: result.version, contentVersion: result.contentVersion }
+    const links = outlineLinks(config, row)
+    return {
+      docId, existing: result.existing, version: result.version, contentVersion: result.contentVersion,
+      outlineEditUrl: links.outlineEditUrl, outlineViewUrl: links.outlineViewUrl,
+    }
   }))
 
   server.registerTool('get_outline', {
@@ -129,12 +133,15 @@ export function registerOutlineTools(server: McpServer, ctx: OutlineMcpCtx): voi
   }, call(({ docId, source, cursor, limit }: { docId: string, source?: { type?: 'current' | 'submission' | 'approval', id?: string }, cursor?: number, limit?: number }) => {
     const { access } = ownDoc(docId)
     const { kind, meta, snapshot } = readSource(docId, access, source as never)
+    const content = (snapshot as { content: unknown }).content
+    const doc = outlineSchema.nodeFromJSON(content)
     return {
       docId, source: kind, meta,
-      content: (snapshot as { content: unknown }).content,
+      content,
       threads: (snapshot as { threads: unknown }).threads,
-      assets: (snapshot as { assets?: unknown }).assets ?? [],
-      readable: readableBlocks((snapshot as { content: unknown }).content, cursor, limit),
+      // 素材清单始终按所读快照正文实时推导，不依赖快照是否冗余存储
+      assets: assetManifest(doc),
+      readable: readableBlocks(content, cursor, limit),
     }
   }))
 
@@ -196,21 +203,20 @@ export function registerOutlineTools(server: McpServer, ctx: OutlineMcpCtx): voi
     const { access } = ownDoc(docId)
     const { snapshot } = readSource(docId, access, source as never)
     const doc = outlineSchema.nodeFromJSON((snapshot as { content: unknown }).content)
-    let referenced = false
-    doc.descendants(node => {
-      if (node.type.name === 'image' && String(node.attrs.src).includes(assetId)) referenced = true
-      return true
-    })
-    const manifest = (snapshot as { assets?: { assetId?: string }[] }).assets ?? []
-    if (!referenced && !manifest.some(a => a.assetId === assetId)) {
+    // 精确资产身份：所读版本必须存在 /assets/{assetId}.{ext} 的图片引用（禁止子串匹配与任意路径）
+    const referenced = assetManifest(doc).some(a => a.assetId === assetId)
+    if (!referenced) {
       throw AppError.forbidden('该图片未被当前读取的大纲版本引用')
     }
     const row = db.prepare('SELECT * FROM assets WHERE id = ?').get(assetId) as AssetRow | undefined
     if (!row || row.owner_id !== ownerId) throw AppError.forbidden('图片资产不存在或不属于当前账号')
-    if (row.size > MAX_ASSET_BYTES) throw AppError.docTooLarge('图片过大，请分段处理')
-    const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[row.mime] ?? 'bin'
+    if (row.size > MAX_ASSET_BYTES) throw AppError.docTooLarge(`图片过大（>${MAX_ASSET_BYTES} 字节），请分段处理`)
+    const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }[row.mime]
+    if (!ext) throw AppError.forbidden('资产类型不是受支持的图片')
     const file = join(config.dataDir, 'assets', `${row.id}.${ext}`)
     if (!existsSync(file)) throw AppError.notFound('图片文件不存在')
-    return { content: [{ type: 'image' as const, data: readFileSync(file).toString('base64'), mimeType: row.mime }] }
+    const buf = readFileSync(file)
+    if (buf.length > MAX_ASSET_BYTES) throw AppError.docTooLarge('图片文件超限')
+    return { content: [{ type: 'image' as const, data: buf.toString('base64'), mimeType: row.mime }] }
   }))
 }
