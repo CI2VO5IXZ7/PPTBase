@@ -133,3 +133,44 @@ describe('XSS 清洗', () => {
     expect(res.json().url).toMatch(/^\/assets\//)
   })
 })
+
+describe('大纲注入防护', () => {
+  it('危险节点类型、伪协议链接与脚本属性被拒绝且不执行', async () => {
+    const doc = await createDoc(ctx, alice.key, {})
+    await ctx.app.inject({ method: 'POST', url: `/api/docs/${doc.docId}/outline`, headers: auth(alice.key), payload: {} })
+    const evil = [
+      { type: 'script', attrs: {}, content: [{ type: 'text', text: 'alert(1)' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: 'x', marks: [{ type: 'link', attrs: { href: 'javascript:alert(1)' } }] }] },
+      { type: 'paragraph', content: [{ type: 'text', text: 'y', marks: [{ type: 'link', attrs: { href: 'data:text/html,<script>' } }] }] },
+      { type: 'paragraph', content: [{ type: 'text', text: 'z', marks: [{ type: 'link', attrs: { href: 'java\tscript:alert(2)' } }] }] },
+      { type: 'image', attrs: { blockId: 'e1', src: 'file:///etc/passwd' } },
+      { type: 'image', attrs: { blockId: 'e2', src: '/assets/does-not-exist.png' } },
+      { type: 'paragraph', attrs: { blockId: 'x', onclick: 'alert(3)' }, content: [{ type: 'text', text: 'a' }] },
+    ]
+    for (const [i, block] of evil.entries()) {
+      const res = await ctx.app.inject({
+        method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+        headers: auth(alice.key),
+        payload: { baseVersion: 1, ops: [{ op: 'insertBlocks', blocks: [block] }] },
+      })
+      expect(res.statusCode, `evil[${i}]`).toBe(400)
+    }
+  })
+
+  it('批注内容是纯文本存储，HTML 不会被解释为标记', async () => {
+    const doc = await createDoc(ctx, alice.key, {})
+    await ctx.app.inject({ method: 'POST', url: `/api/docs/${doc.docId}/outline`, headers: auth(alice.key), payload: {} })
+    const res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: auth(alice.key),
+      payload: {
+        baseVersion: 1,
+        ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: '<script>alert(1)</script><b>粗</b>' }],
+      },
+    })
+    expect(res.statusCode).toBe(200)
+    const get = await ctx.app.inject({ method: 'GET', url: `/api/docs/${doc.docId}/outline`, headers: auth(alice.key) })
+    // 评论按纯文本原样存储/返回；渲染侧（阶段B）必须以文本节点输出，不解析为 HTML
+    expect(get.json().threads[0].messages[0].content).toBe('<script>alert(1)</script><b>粗</b>')
+  })
+})

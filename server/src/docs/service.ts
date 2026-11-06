@@ -39,9 +39,11 @@ export interface CommitResult {
 export interface DocServiceDeps {
   db: Db
   config: AppConfig
+  // 大纲占用的受控存储字节（当前正文/线程＋保留快照），无大纲时为 0
+  outlineBytes?: (docId: string) => number
 }
 
-export function createDocService({ db, config }: DocServiceDeps) {
+export function createDocService({ db, config, outlineBytes }: DocServiceDeps) {
   const getUserStmt = () => db.prepare('SELECT * FROM users WHERE id = ?')
 
   function mustGetDoc(docId: string): DocumentRow {
@@ -93,8 +95,10 @@ export function createDocService({ db, config }: DocServiceDeps) {
     const quota = ownerQuota(row.owner_id)
     const json = JSON.stringify(data)
     const size = Buffer.byteLength(json)
-    if (size > quota.docBytes) {
-      throw AppError.docTooLarge(`文档超过大小限制（${Math.round(quota.docBytes / 1024 / 1024)}MB）`)
+    // 受控合计：PPT 正文与大纲（含保留快照）共用同一大小预算
+    const outlineExtra = outlineBytes?.(docId) ?? 0
+    if (size + outlineExtra > quota.docBytes) {
+      throw AppError.docTooLarge(`文档与大纲合计超过大小限制（${Math.round(quota.docBytes / 1024 / 1024)}MB）`)
     }
 
     const prev = JSON.parse(row.data) as DocData
@@ -173,13 +177,33 @@ export function createDocService({ db, config }: DocServiceDeps) {
 
     listDocs(ownerId: string) {
       const rows = db.prepare(
-        'SELECT id, title, version, data, updated_at FROM documents WHERE owner_id = ? ORDER BY updated_at DESC'
-      ).all(ownerId) as { id: string, title: string, version: number, data: string, updated_at: number }[]
+        `SELECT d.id, d.title, d.version, d.data, d.updated_at,
+           o.version AS outline_version, o.content_version AS outline_content_version,
+           a.content_version AS approval_content_version,
+           (SELECT COUNT(*) FROM outline_submissions s WHERE s.doc_id = d.id AND s.status = 'pending') AS outline_pending
+         FROM documents d
+         LEFT JOIN outlines o ON o.doc_id = d.id
+         LEFT JOIN outline_approvals a ON a.id = o.active_approval_id
+         WHERE d.owner_id = ? ORDER BY d.updated_at DESC`
+      ).all(ownerId) as {
+        id: string, title: string, version: number, data: string, updated_at: number,
+        outline_version: number | null, outline_content_version: number | null,
+        approval_content_version: number | null, outline_pending: number,
+      }[]
       return rows.map(row => ({
         id: row.id,
         title: row.title,
         version: row.version,
         slideCount: (JSON.parse(row.data) as DocData).slides.length,
+        hasOutline: row.outline_version !== null,
+        ...(row.outline_version !== null ? {
+          outline: {
+            version: row.outline_version,
+            contentVersion: row.outline_content_version,
+            pendingSubmissions: row.outline_pending,
+            approvalValid: row.approval_content_version !== null && row.approval_content_version === row.outline_content_version,
+          },
+        } : {}),
         updatedAt: row.updated_at,
       }))
     },
@@ -188,6 +212,9 @@ export function createDocService({ db, config }: DocServiceDeps) {
       mustGetDoc(docId)
       const write = db.transaction(() => {
         db.prepare('DELETE FROM revisions WHERE doc_id = ?').run(docId)
+        // outline_revisions 与 revisions 一样无外键，手动清理；
+        // outlines/submissions/approvals 由外键级联删除
+        db.prepare('DELETE FROM outline_revisions WHERE doc_id = ?').run(docId)
         db.prepare('DELETE FROM documents WHERE id = ?').run(docId)
       })
       write()

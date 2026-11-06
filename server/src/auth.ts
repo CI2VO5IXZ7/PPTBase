@@ -87,6 +87,15 @@ export function docLinks(config: AppConfig, doc: DocumentRow): { editUrl: string
   }
 }
 
+// 大纲页签链接：与 PPT 链接同一套令牌与轮换规则（link_version 失效同时失效）
+export function outlineLinks(config: AppConfig, doc: DocumentRow): { outlineEditUrl: string, outlineViewUrl: string } {
+  const base = config.publicBaseUrl
+  return {
+    outlineEditUrl: `${base}/?doc=${doc.id}&tab=outline#t=${signDocToken(config.secret, doc.id, doc.link_version, 'edit')}`,
+    outlineViewUrl: `${base}/?doc=${doc.id}&tab=outline&mode=view#t=${signDocToken(config.secret, doc.id, doc.link_version, 'view')}`,
+  }
+}
+
 // 统一入口：Key → owner 角色（作者 agent）；X-Doc-Token → edit/view 角色（作者 user）
 // 文档不存在或不属于该 Key 一律 404
 export function resolveDocAccess(db: Db, config: AppConfig, req: FastifyRequest, docId: string): DocAccess {

@@ -1,9 +1,10 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify'
 
-import { authenticateKey, docLinks, resolveDocAccess } from '../auth'
+import { authenticateKey, docLinks, outlineLinks, resolveDocAccess } from '../auth'
 import type { AppConfig } from '../config'
 import type { Db } from '../db'
 import type { DocService } from '../docs/service'
+import type { OutlineService } from '../outline/service'
 import { AppError } from '../errors'
 import { subscribe } from '../events'
 
@@ -11,13 +12,14 @@ interface DocsRoutesDeps {
   db: Db
   config: AppConfig
   service: DocService
+  outline: OutlineService
 }
 
 function docId(req: FastifyRequest): string {
   return (req.params as { id: string }).id
 }
 
-export function docsRoutes({ db, config, service }: DocsRoutesDeps): FastifyPluginAsync {
+export function docsRoutes({ db, config, service, outline }: DocsRoutesDeps): FastifyPluginAsync {
   return app => {
     app.get('/api/docs', req => {
       const { userId } = authenticateKey(db, req)
@@ -67,6 +69,8 @@ export function docsRoutes({ db, config, service }: DocsRoutesDeps): FastifyPlug
       const access = resolveDocAccess(db, config, req, docId(req))
       const { row, data } = service.getDoc(docId(req))
       const links = docLinks(config, row)
+      const outlineStatus = outline.status(docId(req))
+      const olinks = outlineStatus ? outlineLinks(config, row) : null
       return {
         id: row.id,
         version: row.version,
@@ -76,8 +80,10 @@ export function docsRoutes({ db, config, service }: DocsRoutesDeps): FastifyPlug
         viewportSize: data.viewportSize,
         viewportRatio: data.viewportRatio,
         slides: data.slides,
-        ...(access.role === 'owner' ? { editUrl: links.editUrl } : {}),
-        ...(access.role !== 'view' ? { viewUrl: links.viewUrl } : {}),
+        hasOutline: outlineStatus !== null,
+        ...(outlineStatus ? { outline: outlineStatus } : {}),
+        ...(access.role === 'owner' ? { editUrl: links.editUrl, ...(olinks ? { outlineEditUrl: olinks.outlineEditUrl } : {}) } : {}),
+        ...(access.role !== 'view' ? { viewUrl: links.viewUrl, ...(olinks ? { outlineViewUrl: olinks.outlineViewUrl } : {}) } : {}),
       }
     })
 

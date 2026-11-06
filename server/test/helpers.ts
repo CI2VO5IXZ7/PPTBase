@@ -88,3 +88,41 @@ export function slide(id: string, elements: unknown[] = []) {
 
 // 1x1 PNG
 export const PNG_DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+export async function createOutline(ctx: TestContext, key: string, docId: string, body: Record<string, unknown> = {}) {
+  const res = await ctx.app.inject({
+    method: 'POST',
+    url: `/api/docs/${docId}/outline`,
+    headers: auth(key),
+    payload: body,
+  })
+  return res
+}
+
+// 大纲正文 JSON 构造工具（blockId 可在测试中显式指定，服务端也会归一化补齐）
+export function para(id: string, text: string) {
+  return {
+    type: 'paragraph',
+    attrs: { blockId: id },
+    content: text ? [{ type: 'text', text }] : [],
+  }
+}
+
+export function heading(id: string, level: number, text: string) {
+  return {
+    type: 'heading',
+    attrs: { blockId: id, level },
+    content: text ? [{ type: 'text', text }] : [],
+  }
+}
+
+export function imageBlock(id: string, src: string, extra: Record<string, unknown> = {}) {
+  return {
+    type: 'image',
+    attrs: { blockId: id, src, alt: '', caption: '', usage: 'reference', usageDescription: '', ...extra },
+  }
+}
+
+export function outlineDocJson(...blocks: unknown[]) {
+  return { type: 'doc', content: blocks }
+}

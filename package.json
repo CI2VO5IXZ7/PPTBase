@@ -37,6 +37,7 @@
     "prosemirror-schema-basic": "^1.2.3",
     "prosemirror-schema-list": "^1.4.1",
     "prosemirror-state": "^1.4.3",
+    "prosemirror-transform": "1.8.0",
     "prosemirror-view": "^1.33.9",
     "svg-pathdata": "^7.1.0",
     "tinycolor2": "^1.6.0",

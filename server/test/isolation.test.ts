@@ -117,3 +117,65 @@ describe('多用户隔离', () => {
     expect(res.statusCode).toBe(401)
   })
 })
+
+describe('大纲访问隔离', () => {
+  it('他人 Key 访问大纲 REST 一律 404', async () => {
+    // bob 的 Key 在前面的用例中已被吊销，另建用户验证越权
+    const charlie = createUser(ctx, 'charlie')
+    const create = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline`, headers: auth(alice.key), payload: {},
+    })
+    expect(create.statusCode).toBe(200)
+    for (const req of [
+      { method: 'GET', url: `/api/docs/${doc.docId}/outline` },
+      { method: 'PATCH', url: `/api/docs/${doc.docId}/outline`, payload: { baseVersion: 1, steps: [] } },
+      { method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`, payload: { baseVersion: 1, ops: [{ op: 'setThreadStatus', threadId: 'x', status: 'open' }] } },
+      { method: 'GET', url: `/api/docs/${doc.docId}/outline/feedback` },
+      { method: 'POST', url: `/api/docs/${doc.docId}/outline/feedback`, payload: {} },
+      { method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`, payload: { baseVersion: 1 } },
+      { method: 'DELETE', url: `/api/docs/${doc.docId}/outline/approval` },
+      { method: 'POST', url: `/api/docs/${doc.docId}/outline/generation`, payload: {} },
+    ] as const) {
+      const res = await ctx.app.inject({ ...req, headers: auth(charlie.key) })
+      expect(res.statusCode, `${req.method} ${req.url}`).toBe(404)
+    }
+  })
+
+  it('view 令牌可读但所有写路径拒绝；edit 令牌可写', async () => {
+    const view = viewTokenOf(ctx, doc.docId)
+    const get = await ctx.app.inject({ method: 'GET', url: `/api/docs/${doc.docId}/outline`, headers: tokenHeader(view) })
+    expect(get.statusCode).toBe(200)
+    expect(get.json().role).toBe('view')
+    expect(get.json().outlineEditUrl).toBeUndefined()
+
+    for (const req of [
+      { method: 'PATCH', url: `/api/docs/${doc.docId}/outline`, payload: { baseVersion: 1, steps: [{ stepType: 'replace', from: 0, to: 0 }] } },
+      { method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`, payload: { baseVersion: 1, ops: [{ op: 'deleteBlocks', blockIds: ['x'] }] } },
+      { method: 'POST', url: `/api/docs/${doc.docId}/outline/feedback`, payload: {} },
+      { method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`, payload: { baseVersion: 1 } },
+    ] as const) {
+      const res = await ctx.app.inject({ ...req, headers: tokenHeader(view) })
+      expect(res.statusCode, `${req.method} ${req.url}`).toBe(403)
+    }
+
+    const edit = editTokenOf(ctx, doc.docId)
+    const write = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(edit),
+      payload: { baseVersion: 1, ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: 'hi' }] },
+    })
+    expect(write.statusCode).toBe(200)
+  })
+
+  it('轮换链接后大纲令牌同样失效；停用用户拒绝', async () => {
+    const stale = editTokenOf(ctx, doc.docId)
+    await ctx.app.inject({ method: 'POST', url: `/api/docs/${doc.docId}/links/rotate`, headers: auth(alice.key) })
+    const denied = await ctx.app.inject({ method: 'GET', url: `/api/docs/${doc.docId}/outline`, headers: tokenHeader(stale) })
+    expect(denied.statusCode).toBe(401)
+
+    ctx.db.prepare('UPDATE users SET status = ? WHERE id = ?').run('disabled', alice.userId)
+    const disabled = await ctx.app.inject({ method: 'GET', url: `/api/docs/${doc.docId}/outline`, headers: tokenHeader(editTokenOf(ctx, doc.docId)) })
+    expect(disabled.statusCode).toBe(401)
+    ctx.db.prepare('UPDATE users SET status = ? WHERE id = ?').run('active', alice.userId)
+  })
+})
