@@ -204,7 +204,7 @@ mcp_servers:
 - 容器内非 root（`pwuser`）运行，`pptist-admin` 已链接到 `/usr/local/bin`；`EXPOSE 3100`，健康检查 `/api/health`。
 - 单容器内：Fastify 托管前端构建产物（`STATIC_DIR`，SPA fallback）+ REST `/api/*` + MCP `/mcp` + 资产 `/assets/*` + 导出 `/exports/*` + Playwright Chromium（经 `RENDER_BASE_URL` 自指打开导出页）。
 - 前端打包资源走 `/static/`（`vite.config.ts` 的 `build.assetsDir`），把 `/assets` 前缀留给服务端资产路由，二者不冲突。
-- `docker-compose.yml`：`app`（挂载 `./data:/data`，`mem_limit: 3g`，`restart: unless-stopped`）+ 可选 `caddy`（`profile: https`，默认不启动）。`mem_limit` 适用于 compose v2 非 swarm；swarm 模式请改用 `deploy.resources.limits.memory`。
+- `docker-compose.yml`：`app`（挂载 `./data:/data`，`mem_limit: 3g`，`restart: unless-stopped`）+ 可选 `caddy`（`profile: https`）。`caddy` 默认不启动：普通 `docker compose up -d` 只起 app（本地演练/自有反代场景），只有 `docker compose --profile https up -d` 才同时起 Caddy。`mem_limit` 适用于 compose v2 非 swarm；swarm 模式请改用 `deploy.resources.limits.memory`。
 - `Caddyfile`：`reverse_proxy app:3100` + `flush_interval -1`（SSE/流式关闭缓冲）。
 
 ### 本地跑一遍
@@ -217,16 +217,15 @@ curl http://127.0.0.1:3100/api/health          # → {"ok":true}
 curl -I http://127.0.0.1:3100/                  # → 200 text/html（前端 index）
 docker compose exec app pptist-admin user create alice   # 建用户，保存输出的 pk_ Key
 docker compose exec app pptist-admin key create alice --label hermes
-docker compose exec app pptist-admin backup /data/backup-$(date +%F).db   # 备份
 docker compose logs -f app
 docker compose down
 ```
 
 冒烟：浏览器开 `http://127.0.0.1:3100/?doc=<id>#t=<token>`（`user create` 后用 `POST /api/docs` 拿 editUrl）；`POST /mcp` 带 `Authorization: Bearer pk_…`。
 
-### 部署到 honcho / VPS
+### 部署到 Linux 主机（生产 / HTTPS）
 
-> 测试目标机为 **honcho**；以下步骤对任何装有 Docker 的 Linux 主机通用（计划书中的 VPS 4C8G + Caddy 公网方案作为参考）。真实域名、Key、证书一律不入库。
+> 以下步骤对任何装有 Docker 的 Linux 主机通用（4C8G + Caddy 公网方案作为参考）。真实域名、Key、证书一律不入库。
 
 1. 同步代码到主机：`git clone` 或 `git pull`。
 2. （启用 HTTPS 时）DNS 把 `pptist.example.com` 换成真实域名并解析到主机；防火墙/安全组放行 80、443。应用端口 3100 只需容器网络内部可达；宿主映射避开 3000/3030/4000。
@@ -234,6 +233,6 @@ docker compose down
 4. 启动：`docker compose --profile https up -d`；宿主 80/443 被占或不需 HTTPS 时，去掉 `--profile https` 仅起 app。
 5. 首个用户：`docker compose exec app pptist-admin user create <name>`，保存输出的 `pk_` Key（只显示一次）。
 6. 按「客户端配置」把 `https://你的域名/mcp` + `Authorization: Bearer pk_…` 配进 Agent。
-7. 备份：`docker compose exec app pptist-admin backup /data/backup-$(date +%F).db`，产物在宿主 `./data/` 下，建议再定时异地拷贝。
+7. 备份：`docker compose exec app pptist-admin backup /data/backup-$(date +%F).db`，产物在宿主 `./data/` 下；是否定时/异地拷贝由部署者按需自行安排，仓库不包含自动备份任务。
 
 资源建议：内存 ≥ 4G（`mem_limit 3g` + Chromium + Caddy），磁盘按资产与导出量预估；`./data` 需要能被容器内 `pwuser`（playwright noble 镜像中 uid 1001）写入，宿主办不到时改用 named volume。

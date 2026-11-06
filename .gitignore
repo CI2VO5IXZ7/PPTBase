@@ -29,5 +29,10 @@ coverage
 
 *.tsbuildinfo
 
+# 环境变量/密钥文件不入库；保留 .env.example 占位模板
+.env
+.env.*
+!.env.example
+
 server/data
 /data/
