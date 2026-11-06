@@ -240,7 +240,7 @@ export const useAdminStore = defineStore('admin', {
       // 状态已落库，后续刷新失败只降级为告警，不回滚、不误报失败
       const settled = await Promise.allSettled([
         (async () => {
-          if (this.detailUser?.id === userId) await this.loadKeys() 
+          if (this.detailUser?.id === userId) await this.loadKeys()
         })(),
         this.loadUsers(),
         this.loadOverview(),
