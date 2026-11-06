@@ -41,9 +41,11 @@ export interface DocServiceDeps {
   config: AppConfig
   // 大纲占用的受控存储字节（当前正文/线程＋保留快照），无大纲时为 0
   outlineBytes?: (docId: string) => number
+  // 制作门禁：有大纲的文档要求 Agent 写页面时携带有效确认来源
+  outlineGate?: (docId: string, sourceApprovalId: string | undefined) => void
 }
 
-export function createDocService({ db, config, outlineBytes }: DocServiceDeps) {
+export function createDocService({ db, config, outlineBytes, outlineGate }: DocServiceDeps) {
   const getUserStmt = () => db.prepare('SELECT * FROM users WHERE id = ?')
 
   function mustGetDoc(docId: string): DocumentRow {
@@ -247,7 +249,8 @@ export function createDocService({ db, config, outlineBytes }: DocServiceDeps) {
     },
 
     // Agent 原子操作：传了 baseVersion 但和当前版本不一致 → 409
-    applyAgentOps(access: DocAccess, docId: string, ops: Op[], baseVersion?: number) {
+    applyAgentOps(access: DocAccess, docId: string, ops: Op[], baseVersion?: number, sourceApprovalId?: string) {
+      if (access.author === 'agent') outlineGate?.(docId, sourceApprovalId)
       const row = mustGetDoc(docId)
       if (baseVersion !== undefined && baseVersion !== row.version) {
         throw AppError.conflict(`baseVersion=${baseVersion} 与当前版本 ${row.version} 不一致，请先拉取最新文档`, { currentVersion: row.version })
@@ -259,7 +262,8 @@ export function createDocService({ db, config, outlineBytes }: DocServiceDeps) {
     },
 
     // RFC6902 patch：baseVersion 必须等于当前版本
-    applyJsonPatch(access: DocAccess, docId: string, baseVersion: number, patch: unknown[]) {
+    applyJsonPatch(access: DocAccess, docId: string, baseVersion: number, patch: unknown[], sourceApprovalId?: string) {
+      if (access.author === 'agent') outlineGate?.(docId, sourceApprovalId)
       const row = mustGetDoc(docId)
       if (baseVersion !== row.version) {
         throw AppError.conflict(`baseVersion=${baseVersion} 与当前版本 ${row.version} 不一致`, { currentVersion: row.version })

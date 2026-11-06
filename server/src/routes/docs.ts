@@ -48,21 +48,21 @@ export function docsRoutes({ db, config, service, outline }: DocsRoutesDeps): Fa
     app.post('/api/docs/:id/ops', req => {
       const access = resolveDocAccess(db, config, req, docId(req))
       if (access.role !== 'owner') throw AppError.notFound()
-      const body = req.body as { ops?: unknown, baseVersion?: number }
+      const body = req.body as { ops?: unknown, baseVersion?: number, sourceApprovalId?: string }
       if (!body || !Array.isArray(body.ops) || !body.ops.length) {
         throw AppError.validation('请求体缺少非空数组 ops')
       }
-      return service.applyAgentOps(access, docId(req), body.ops as never[], body.baseVersion)
+      return service.applyAgentOps(access, docId(req), body.ops as never[], body.baseVersion, body.sourceApprovalId)
     })
 
     app.post('/api/docs/:id/patch', req => {
       const access = resolveDocAccess(db, config, req, docId(req))
       if (access.role !== 'owner') throw AppError.notFound()
-      const body = req.body as { baseVersion?: number, ops?: unknown }
+      const body = req.body as { baseVersion?: number, ops?: unknown, sourceApprovalId?: string }
       if (!body || typeof body.baseVersion !== 'number' || !Array.isArray(body.ops)) {
         throw AppError.validation('请求体需要 baseVersion 和 ops（RFC6902 数组）')
       }
-      return service.applyJsonPatch(access, docId(req), body.baseVersion, body.ops)
+      return service.applyJsonPatch(access, docId(req), body.baseVersion, body.ops, body.sourceApprovalId)
     })
 
     app.get('/api/docs/:id', req => {

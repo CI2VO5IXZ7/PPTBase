@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { auth, createDoc, createUser, makeApp, textElement, type TestContext } from './helpers'
+import { auth, createDoc, createUser, editTokenOf, makeApp, textElement, tokenHeader, type TestContext } from './helpers'
 
 let ctx: TestContext
 let alice: { userId: string, key: string }
@@ -64,11 +64,21 @@ describe('大纲配额', () => {
     const revs = ctx.db.prepare('SELECT COUNT(*) AS n FROM outline_revisions WHERE doc_id = ? AND version > 1').get(doc.docId) as { n: number }
     expect(revs.n).toBe(0)
 
-    // PPT 写入同样受合计预算限制
+    // PPT 写入同样受合计预算限制（有大纲 → 先拿到制作来源再过门禁）
+    const token = editTokenOf(ctx, doc.docId)
+    await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: 1, acknowledgeOpenThreads: true },
+    })
+    const gen = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/generation`,
+      headers: auth(alice.key), payload: {},
+    })
     const ppt = await ctx.app.inject({
       method: 'POST', url: `/api/docs/${doc.docId}/ops`,
       headers: auth(alice.key),
-      payload: { ops: [{ op: 'addSlides', slides: [{ id: 's_big', elements: [textElement('e_big', big)] }] }] },
+      payload: { ops: [{ op: 'addSlides', slides: [{ id: 's_big', elements: [textElement('e_big', big)] }] }], sourceApprovalId: gen.json().approvalId },
     })
     expect(ppt.statusCode).toBe(413)
     ctx.db.prepare('UPDATE users SET quota_doc_bytes = NULL WHERE id = ?').run(alice.userId)

@@ -10,6 +10,8 @@ export interface DocumentState {
   version: number
   saveStatus: SaveStatus
   viewUrl: string
+  hasOutline: boolean
+  outlineUrl: string
   lastRemoteSummary: string[]
 }
 
@@ -21,6 +23,8 @@ export const useDocumentStore = defineStore('document', {
     version: 0,
     saveStatus: 'saved',
     viewUrl: '',
+    hasOutline: false,
+    outlineUrl: '',
     lastRemoteSummary: [],
   }),
 
@@ -46,6 +50,10 @@ export const useDocumentStore = defineStore('document', {
     },
     setViewUrl(viewUrl: string) {
       this.viewUrl = viewUrl
+    },
+    setOutlineInfo(hasOutline: boolean, outlineUrl: string) {
+      this.hasOutline = hasOutline
+      this.outlineUrl = outlineUrl
     },
     setLastRemoteSummary(summary: string[]) {
       this.lastRemoteSummary = summary

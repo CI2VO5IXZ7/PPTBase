@@ -15,12 +15,15 @@ import type { RenderQueue } from '../render/queue'
 import type { DocData } from '../schema/document'
 import { AppError } from '../errors'
 import { getAuthoringGuide } from './guide'
+import { registerOutlineTools } from './outline'
+import type { OutlineService } from '../outline/service'
 import { MCP_INSTRUCTIONS } from './instructions'
 
 export interface McpContext {
   db: Db
   config: AppConfig
   service: DocService
+  outline: OutlineService
   queue: RenderQueue
   ownerId: string
   keyId: string
@@ -64,7 +67,7 @@ function fail(err: unknown): TextResult {
 
 // 每个 MCP 请求新建一个 McpServer（无状态模式），ownerId/keyId 来自本次请求的 Bearer Key
 export function buildMcpServer(ctx: McpContext): McpServer {
-  const { db, config, service, queue, ownerId, keyId } = ctx
+  const { db, config, service, outline, queue, ownerId, keyId } = ctx
   const server = new McpServer(
     { name: 'pptbase', version: '0.1.0' },
     { instructions: MCP_INSTRUCTIONS },
@@ -85,9 +88,10 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     return { row, data: JSON.parse(row.data) as DocData }
   }
 
-  function runOps(docId: string, ops: Op[]) {
+  // sourceApprovalId：有大纲的文档要求写页面时携带确认来源（服务层统一门禁）
+  function runOps(docId: string, ops: Op[], sourceApprovalId?: string) {
     const { access } = ownDoc(docId)
-    const result = service.applyAgentOps(access, docId, ops)
+    const result = service.applyAgentOps(access, docId, ops, undefined, sourceApprovalId)
     return { version: result.version, summary: result.summary }
   }
 
@@ -167,89 +171,98 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     description: '在文档末尾（或 index 指定位置）插入一个或多个新页面。页面结构见 get_authoring_guide 的 slide 章节。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       slides: z.array(z.looseObject({})).min(1).describe('要新增的页面数组'),
       index: z.number().int().min(0).optional().describe('插入位置（页码从 0 开始），不传追加到末尾'),
     },
-  }, call(({ docId, slides, index }: { docId: string, slides: unknown[], index?: number }) =>
-    runOps(docId, [{ op: 'addSlides', slides, ...(index !== undefined ? { index } : {}) } as Op])))
+  }, call(({ docId, slides, index, sourceApprovalId }: { docId: string, slides: unknown[], index?: number, sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'addSlides', slides, ...(index !== undefined ? { index } : {}) } as Op], sourceApprovalId)))
 
   server.registerTool('update_slide', {
     description: '浅合并修改单页除 elements 外的属性（背景、备注、类型、翻页动画等）。元素请用 add_elements / update_elements / delete_elements。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       slideId: z.string().describe('页面 id'),
       props: z.looseObject({}).describe('要合并的页面字段，如 background / remark / type / turningMode / sectionTag'),
     },
-  }, call(({ docId, slideId, props }: { docId: string, slideId: string, props: Record<string, unknown> }) =>
-    runOps(docId, [{ op: 'updateSlide', slideId, props } as Op])))
+  }, call(({ docId, slideId, props, sourceApprovalId }: { docId: string, slideId: string, props: Record<string, unknown>, sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'updateSlide', slideId, props } as Op], sourceApprovalId)))
 
   server.registerTool('delete_slides', {
     description: '按 id 删除一个或多个页面。删除会同时清掉指向它们的链接等元素引用。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       slideIds: z.array(z.string()).min(1).describe('要删除的页面 id 数组'),
     },
-  }, call(({ docId, slideIds }: { docId: string, slideIds: string[] }) =>
-    runOps(docId, [{ op: 'deleteSlides', slideIds }])))
+  }, call(({ docId, slideIds, sourceApprovalId }: { docId: string, slideIds: string[], sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'deleteSlides', slideIds }], sourceApprovalId)))
 
   server.registerTool('move_slide', {
     description: '把一页移动到 toIndex 位置（页码从 0 开始）。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       slideId: z.string().describe('页面 id'),
       toIndex: z.number().int().min(0).describe('目标位置，页码从 0 开始'),
     },
-  }, call(({ docId, slideId, toIndex }: { docId: string, slideId: string, toIndex: number }) =>
-    runOps(docId, [{ op: 'moveSlide', slideId, toIndex }])))
+  }, call(({ docId, slideId, toIndex, sourceApprovalId }: { docId: string, slideId: string, toIndex: number, sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'moveSlide', slideId, toIndex }], sourceApprovalId)))
 
   server.registerTool('add_elements', {
     description: '向指定页面添加一个或多个元素（追加在顶层，index 可指定图层位置）。元素必填字段见 get_authoring_guide 对应章节。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       slideId: z.string().describe('目标页面 id'),
       elements: z.array(z.looseObject({})).min(1).describe('元素数组'),
       index: z.number().int().min(0).optional().describe('插入到元素列表的位置，不传追加到顶层'),
     },
-  }, call(({ docId, slideId, elements, index }: { docId: string, slideId: string, elements: unknown[], index?: number }) =>
-    runOps(docId, [{ op: 'addElements', slideId, elements, ...(index !== undefined ? { index } : {}) } as Op])))
+  }, call(({ docId, slideId, elements, index, sourceApprovalId }: { docId: string, slideId: string, elements: unknown[], index?: number, sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'addElements', slideId, elements, ...(index !== undefined ? { index } : {}) } as Op], sourceApprovalId)))
 
   server.registerTool('update_elements', {
     description: '按元素 id 浅合并修改属性（坐标、尺寸、文本 content、样式等；不能改 id 和 type）。id 可在任意页，updates 一次可改多个元素。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       updates: z.array(z.looseObject({
         id: z.string().describe('元素 id'),
         props: z.looseObject({}).describe('要合并的字段'),
       })).min(1),
     },
-  }, call(({ docId, updates }: { docId: string, updates: { id: string, props: Record<string, unknown> }[] }) =>
-    runOps(docId, [{ op: 'updateElements', updates }])))
+  }, call(({ docId, updates, sourceApprovalId }: { docId: string, updates: { id: string, props: Record<string, unknown> }[], sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'updateElements', updates }], sourceApprovalId)))
 
   server.registerTool('delete_elements', {
     description: '按元素 id 删除元素（可跨页）。引用它们的动画、线条连接会一并清理。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       ids: z.array(z.string()).min(1).describe('要删除的元素 id 数组'),
     },
-  }, call(({ docId, ids }: { docId: string, ids: string[] }) =>
-    runOps(docId, [{ op: 'deleteElements', ids }])))
+  }, call(({ docId, ids, sourceApprovalId }: { docId: string, ids: string[], sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'deleteElements', ids }], sourceApprovalId)))
 
   server.registerTool('batch_edit', {
     description: '一次提交多个原子操作，只产生一条修订：ops 每项形如 { op: 操作名, ...参数 }，操作名同各单步工具（addSlides/updateSlide/deleteSlides/moveSlide/addElements/updateElements/deleteElements/setTheme/setTitle/addNote/replyNote），按顺序执行，任一步失败整体回滚。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       ops: z.array(z.looseObject({ op: z.string() })).min(1).describe('原子操作数组'),
     },
-  }, call(({ docId, ops }: { docId: string, ops: { op: string }[] }) => runOps(docId, ops as Op[])))
+  }, call(({ docId, ops, sourceApprovalId }: { docId: string, ops: { op: string }[], sourceApprovalId?: string }) => runOps(docId, ops as Op[], sourceApprovalId)))
 
   server.registerTool('set_theme', {
     description: '浅合并修改文档主题（themeColors/fontColor/fontName/backgroundColor/outline/shadow），影响全部页面。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       theme: z.looseObject({}).describe('要合并的主题字段'),
     },
-  }, call(({ docId, theme }: { docId: string, theme: Record<string, unknown> }) =>
-    runOps(docId, [{ op: 'setTheme', theme } as Op])))
+  }, call(({ docId, theme, sourceApprovalId }: { docId: string, theme: Record<string, unknown>, sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'setTheme', theme } as Op], sourceApprovalId)))
 
   server.registerTool('get_changes', {
     description: '查看 sinceVersion 之后的修订摘要（了解用户在网页端改了什么的主入口）。author 默认 "user" 只看用户的修改，传 "all" 包含你自己的修改。返回 currentVersion 和 changes 数组；changes 为空表示尚无新修改。把返回的 currentVersion 记下来作为下次的 sinceVersion。',
@@ -301,6 +314,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     description: '在指定页面写一条批注（显示为 Agent 留言），可用 elId 关联到某个元素。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       slideId: z.string().describe('页面 id'),
       content: z.string().min(1).describe('批注内容'),
       elId: z.string().optional().describe('关联的元素 id'),
@@ -312,6 +326,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
     description: '回复用户在网页端留的批注（显示为 Agent 的回复）。noteId 从 list_comments 或 get_presentation 大纲里取。',
     inputSchema: {
       docId: docIdField,
+      sourceApprovalId: z.string().optional().describe('有大纲时必须：begin_presentation_from_outline 返回的 approvalId'),
       slideId: z.string().describe('页面 id'),
       noteId: z.string().describe('批注 id'),
       content: z.string().min(1).describe('回复内容'),
@@ -436,6 +451,8 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       ...(job.error ? { error: job.error } : {}),
     }
   }))
+
+  registerOutlineTools(server, { db, config, outline, ownerId, keyId })
 
   return server
 }

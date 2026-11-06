@@ -9,6 +9,9 @@ export interface DocData {
 }
 
 export interface DocResponse extends DocData {
+  hasOutline?: boolean
+  outlineEditUrl?: string
+  outlineViewUrl?: string
   id: string
   version: number
   role: 'owner' | 'edit' | 'view'
@@ -83,6 +86,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const getDoc = (id: string) => request<DocResponse>(`/api/docs/${id}`)
 
+// 大纲等服务复用同一凭证/错误处理的请求入口
+export const docRequest = request
+
 export const putDoc = (id: string, baseVersion: number, doc: DocData) =>
   request<PutDocResult>(`/api/docs/${id}`, {
     method: 'PUT',
@@ -108,7 +114,14 @@ export const uploadAsset = async (id: string, file: File) => {
 const RETRY_DELAYS = [1000, 2000, 5000, 10000, 20000, 30000]
 
 // EventSource 不支持自定义请求头，用 fetch 流式读取并手动解析 SSE
-export function subscribe(id: string, onUpdate: (event: DocEvent) => void): () => void {
+export interface OutlineEvent {
+  version: number
+  contentVersion: number
+  author: 'agent' | 'user'
+  summary: string[]
+}
+
+export function subscribe(id: string, onUpdate: (event: DocEvent) => void, onOutline?: (event: OutlineEvent) => void): () => void {
   let closed = false
   let retries = 0
   let abort: AbortController | null = null
@@ -125,6 +138,12 @@ export function subscribe(id: string, onUpdate: (event: DocEvent) => void): () =
     if (name === 'update' && dataLines.length) {
       try {
         onUpdate(JSON.parse(dataLines.join('\n'))) 
+      }
+      catch { /* 忽略无法解析的事件 */ }
+    }
+    else if (name === 'outline' && onOutline && dataLines.length) {
+      try {
+        onOutline(JSON.parse(dataLines.join('\n')))
       }
       catch { /* 忽略无法解析的事件 */ }
     }

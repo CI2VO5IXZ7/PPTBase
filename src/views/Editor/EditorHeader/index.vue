@@ -6,6 +6,7 @@
           <div class="main-menu">
             <PopoverMenuItem class="popover-menu-item" @click="setDialogForExport('pptx')"><i-icon-park-outline:download class="icon" /> 导出文件</PopoverMenuItem>
             <PopoverMenuItem class="popover-menu-item" v-if="viewUrl" @click="copyViewLink()"><i-icon-park-outline:link class="icon" /> 复制只读链接</PopoverMenuItem>
+            <PopoverMenuItem class="popover-menu-item" v-if="hasOutline && outlineUrl" @click="openOutline()"><i-icon-park-outline:edit-two class="icon" /> 编辑大纲</PopoverMenuItem>
             <Divider :margin="10" />
             <PopoverMenuItem class="popover-menu-item" @click="mainMenuVisible = false; hotkeyDrawerVisible = true"><i-icon-park-outline:command class="icon" /> 快捷操作</PopoverMenuItem>
           </div>
@@ -80,7 +81,7 @@ const mainStore = useMainStore()
 const slidesStore = useSlidesStore()
 const documentStore = useDocumentStore()
 const { title } = storeToRefs(slidesStore)
-const { docId, viewUrl, saveStatus, lastRemoteSummary } = storeToRefs(documentStore)
+const { docId, viewUrl, saveStatus, lastRemoteSummary, hasOutline, outlineUrl } = storeToRefs(documentStore)
 const { enterScreening, enterScreeningFromStart } = useScreening()
 
 const mainMenuVisible = ref(false)
@@ -113,6 +114,11 @@ watch(lastRemoteSummary, summary => {
   if (!summary.length) return
   message.info(summary.slice(0, 3).join('；'), { title: 'Agent 更新了文档' })
 })
+
+const openOutline = () => {
+  mainMenuVisible.value = false
+  if (outlineUrl.value) window.location.href = outlineUrl.value
+}
 
 const copyViewLink = async () => {
   try {

@@ -196,6 +196,8 @@ export default () => {
     documentStore.setRole(remote.role)
     documentStore.setVersion(remote.version)
     if (remote.viewUrl) documentStore.setViewUrl(remote.viewUrl)
+    // 有大纲时记录入口链接（优先编辑链接，只读角色退回只读链接）
+    documentStore.setOutlineInfo(!!remote.hasOutline, remote.outlineEditUrl ?? remote.outlineViewUrl ?? '')
 
     applyingRemote = true
     slidesStore.setTitle(remote.title)

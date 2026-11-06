@@ -25,10 +25,11 @@
 
       <h2>推荐工作流</h2>
       <ol>
-        <li><code>get_authoring_guide</code> 获取页面数据编写规范</li>
+        <li><code>get_authoring_guide</code> 获取页面数据编写规范（含 outline 章节）</li>
         <li><code>create_presentation</code> 创建文档</li>
         <li>把返回的 <code>editUrl</code> 发给用户（网页端可直接编辑，<code>viewUrl</code> 为只读）</li>
         <li><code>get_changes</code> 查看用户在网页端的修改</li>
+        <li>（推荐）先 <code>create_outline</code> 写大纲 → 发 <code>outlineEditUrl</code> 给用户 → <code>get_outline_feedback</code> 读反馈 → <code>edit_outline</code> 改稿 → 用户确认后 <code>begin_presentation_from_outline</code>，后续写页面工具带 <code>sourceApprovalId</code></li>
         <li><code>export_presentation</code> 导出为 pptx / pdf / png / json</li>
       </ol>
 
@@ -37,6 +38,7 @@
         <tbody>
           <tr><td>指南</td><td><code>get_authoring_guide</code></td></tr>
           <tr><td>文档</td><td><code>create_presentation</code> <code>list_presentations</code> <code>get_presentation</code> <code>get_slide</code> <code>delete_presentation</code> <code>rotate_links</code></td></tr>
+          <tr><td>大纲</td><td><code>create_outline</code> <code>get_outline</code> <code>edit_outline</code> <code>get_outline_feedback</code> <code>complete_outline_feedback</code> <code>begin_presentation_from_outline</code> <code>get_outline_asset</code></td></tr>
           <tr><td>编辑</td><td><code>add_slides</code> <code>update_slide</code> <code>delete_slides</code> <code>move_slide</code> <code>add_elements</code> <code>update_elements</code> <code>delete_elements</code> <code>batch_edit</code> <code>set_theme</code></td></tr>
           <tr><td>协作</td><td><code>get_changes</code> <code>list_comments</code> <code>add_comment</code> <code>reply_comment</code></td></tr>
           <tr><td>素材</td><td><code>upload_image</code>（外链或 base64 转存，返回可写入 <code>image.src</code> 的地址）</td></tr>

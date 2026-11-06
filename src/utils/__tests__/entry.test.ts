@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { isMcpHomeEntry } from '../entry.ts'
+import { isMcpHomeEntry, isOutlineEntry } from '../entry.ts'
 
 test('根路径无参数显示 MCP 说明页', () => {
   assert.equal(isMcpHomeEntry(''), true)
@@ -20,4 +20,12 @@ test('带 mode 参数保持原有行为', () => {
   assert.equal(isMcpHomeEntry('?mode=export'), false)
   assert.equal(isMcpHomeEntry('?mode=view'), false)
   assert.equal(isMcpHomeEntry('?mode=audience'), false)
+})
+
+test('大纲入口判定：doc + tab=outline 才走大纲页', () => {
+  assert.equal(isOutlineEntry('?doc=abc&tab=outline'), true)
+  assert.equal(isOutlineEntry('?doc=abc'), false)
+  assert.equal(isOutlineEntry('?doc=abc&tab=ppt'), false)
+  assert.equal(isOutlineEntry('?tab=outline'), false)
+  assert.equal(isOutlineEntry('?doc=abc&mode=view'), false)
 })

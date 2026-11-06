@@ -100,6 +100,7 @@ function applyContentOp(tr: Transform, op: OutlineOp, i: number, modifiedIds: Se
       const ref = requireBlock(doc, op.blockId, w)
       const node = nodeFromJson(op.block, `${w}.block`)
       modifiedIds.add(ref.blockId)
+      collectSubtreeIds(ref.node, modifiedIds)
       try {
         tr.replace(ref.pos, ref.pos + ref.node.nodeSize, new Slice(Fragment.from(node), 0, 0))
       }

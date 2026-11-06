@@ -833,3 +833,167 @@ describe('边界修复', () => {
     expect(item.outline.approvalValid).toBe(false)
   })
 })
+
+describe('制作门禁：Agent 写页面必须携带有效确认来源', () => {
+  const opsPayload = (src?: string) => ({
+    ops: [{ op: 'setTitle', title: 'x' }],
+    ...(src ? { sourceApprovalId: src } : {}),
+  })
+
+  async function approvedDoc() {
+    const { doc } = await docWithOutline()
+    const token = editTokenOf(ctx, doc.docId)
+    const state = (await getOutline(auth(alice.key), doc.docId)).json()
+    const ap = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: state.version, acknowledgeOpenThreads: true, requestId: 'ap-g' },
+    })
+    expect(ap.statusCode).toBe(200)
+    const gen = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/generation`,
+      headers: auth(alice.key), payload: {},
+    })
+    expect(gen.statusCode).toBe(200)
+    return { doc, approvalId: ap.json().approval.id as string }
+  }
+
+  it('无 sourceApprovalId 的 Agent ops 被拒并提示下一步', async () => {
+    const { doc } = await docWithOutline()
+    const res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/ops`,
+      headers: auth(alice.key), payload: opsPayload(),
+    })
+    expect(res.statusCode).toBe(409)
+    expect(res.json().issues.code).toBe('production_source_required')
+    expect(res.json().message).toContain('begin')
+  })
+
+  it('确认+begin 后 Agent ops 带 approvalId 通过；REST PATCH 同样受控', async () => {
+    const { doc, approvalId } = await approvedDoc()
+    const ops = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/ops`,
+      headers: auth(alice.key), payload: opsPayload(approvalId),
+    })
+    expect(ops.statusCode).toBe(200)
+    // REST patch 同样需要 sourceApprovalId：缺失被拒，携带则按正常校验走
+    const noSrc = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/patch`,
+      headers: auth(alice.key),
+      payload: { baseVersion: 1, ops: [{ op: 'replace', path: '/title', value: 'y' }] },
+    })
+    expect(noSrc.statusCode).toBe(409)
+    const docNow = (await ctx.app.inject({
+      method: 'GET', url: `/api/docs/${doc.docId}`, headers: auth(alice.key),
+    })).json()
+    const withSrc = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/patch`,
+      headers: auth(alice.key),
+      payload: { baseVersion: docNow.version, ops: [{ op: 'replace', path: '/title', value: 'y' }], sourceApprovalId: approvalId },
+    })
+    expect(withSrc.statusCode).toBe(200)
+  })
+
+  it('未 begin（有确认但无制作来源）拒绝', async () => {
+    const { doc } = await docWithOutline()
+    const token = editTokenOf(ctx, doc.docId)
+    const state = (await getOutline(auth(alice.key), doc.docId)).json()
+    await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: state.version, acknowledgeOpenThreads: true, requestId: 'ap-u' },
+    })
+    const res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/ops`,
+      headers: auth(alice.key), payload: opsPayload(),
+    })
+    expect(res.statusCode).toBe(409)
+  })
+
+  it('撤销确认后旧 approvalId 失效；正文变化后同样失效', async () => {
+    const { doc, approvalId } = await approvedDoc()
+    await ctx.app.inject({
+      method: 'DELETE', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(editTokenOf(ctx, doc.docId)),
+    })
+    const revoked = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/ops`,
+      headers: auth(alice.key), payload: opsPayload(approvalId),
+    })
+    expect(revoked.statusCode).toBe(409)
+
+    // 重新确认+begin，再改正文 → stale
+    const token = editTokenOf(ctx, doc.docId)
+    const cur = (await getOutline(auth(alice.key), doc.docId)).json()
+    const ap2 = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: cur.version, acknowledgeOpenThreads: true, requestId: 'ap-g2' },
+    })
+    await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/generation`,
+      headers: auth(alice.key), payload: {},
+    })
+    const cur2 = (await getOutline(auth(alice.key), doc.docId)).json()
+    await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: cur2.version, ops: [{ op: 'insertBlocks', blocks: [para('p', '新段落')] }] },
+    })
+    const stale = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/ops`,
+      headers: auth(alice.key), payload: opsPayload(ap2.json().approval.id),
+    })
+    expect(stale.statusCode).toBe(409)
+  })
+
+  it('仅加批注不使确认失效（contentVersion 不变）', async () => {
+    const { doc, approvalId } = await approvedDoc()
+    const token = editTokenOf(ctx, doc.docId)
+    const cur = (await getOutline(auth(alice.key), doc.docId)).json()
+    await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: cur.version, ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: '意见' }] },
+    })
+    const res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/ops`,
+      headers: auth(alice.key), payload: opsPayload(approvalId),
+    })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('浏览器用户（edit token PUT）写页面不受门禁影响', async () => {
+    const { doc } = await docWithOutline()
+    const cur = await ctx.app.inject({
+      method: 'GET', url: `/api/docs/${doc.docId}`,
+      headers: tokenHeader(editTokenOf(ctx, doc.docId)),
+    })
+    const docData = cur.json()
+    const res = await ctx.app.inject({
+      method: 'PUT', url: `/api/docs/${doc.docId}`,
+      headers: tokenHeader(editTokenOf(ctx, doc.docId)),
+      payload: { baseVersion: docData.version, doc: { ...docData, title: '浏览器改名' } },
+    })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('无大纲旧文档：Agent ops 无需来源直接通过', async () => {
+    const doc = await createDoc(ctx, alice.key, { title: 'legacy' })
+    const res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/ops`,
+      headers: auth(alice.key), payload: opsPayload(),
+    })
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('generation requestId 超长被拒', async () => {
+    const { doc, approvalId } = await approvedDoc()
+    void approvalId
+    const res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/generation`,
+      headers: auth(alice.key), payload: { requestId: 'x'.repeat(200) },
+    })
+    expect(res.statusCode).toBe(400)
+  })
+})

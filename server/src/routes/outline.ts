@@ -123,8 +123,11 @@ export function outlineRoutes({ db, config, service, docService }: OutlineRoutes
     app.post('/api/docs/:id/outline/generation', req => {
       const access = resolveDocAccess(db, config, req, docId(req))
       if (access.role !== 'owner') throw AppError.notFound()
-      const body = (req.body ?? {}) as { requestId?: string }
-      return service.beginGeneration(access, docId(req), typeof body.requestId === 'string' ? body.requestId : undefined)
+      const body = (req.body ?? {}) as { requestId?: unknown }
+      if (body.requestId !== undefined && (typeof body.requestId !== 'string' || !body.requestId || body.requestId.length > 128)) {
+        throw AppError.validation('requestId 必须是 1~128 字符的字符串')
+      }
+      return service.beginGeneration(access, docId(req), body.requestId as string | undefined)
     })
     return Promise.resolve()
   }

@@ -23,6 +23,14 @@ npm run build        # esbuild 打包 index.ts + admin.ts 到 dist/
 npm start            # node dist/index.js
 ```
 
+## 大纲（outline）
+
+- 每张文档至多一份大纲：REST `GET/POST/PATCH /api/docs/:id/outline`、`/outline/ops`、`/outline/feedback`、`/outline/approval`、`/outline/generation`；MCP 七个工具同名映射（见 `src/mcp/outline.ts`）。
+- 表：`outlines`（当前内容+版本+线程）、`outline_revisions`（版本流水）、`outline_submissions`/`outline_approvals`（不可变 gzip 快照）。
+- 双版本 CAS：`version`（任何写入+1）与 `contentVersion`（仅正文变化+1）——批注不影响内容确认。
+- 制作门禁：文档有大纲时，Agent 写页面（ops/patch/MCP 写工具）必须携带有效 `sourceApprovalId`（`begin_presentation_from_outline` 返回）；编辑令牌（浏览器用户）与无大纲旧文档不受影响。
+- 备份/恢复：大纲随 `app.db` 一起备份（WAL 在线备份同文档）；大纲引用的图片在 `assets/` 目录，随文档删除级联。升级自动跑 v4 迁移。
+
 ## 环境变量
 
 | 变量 | 默认值 | 说明 |

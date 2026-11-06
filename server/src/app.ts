@@ -25,7 +25,7 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
   // 测试时可直接传入已打开的 db；否则按 DATA_DIR 打开并随 app 关闭
   const ownDb = db ?? openDb(config.dataDir)
   const outlineService = createOutlineService({ db: ownDb, config })
-  const service = createDocService({ db: ownDb, config, outlineBytes: outlineService.storageBytes })
+  const service = createDocService({ db: ownDb, config, outlineBytes: outlineService.storageBytes, outlineGate: outlineService.assertProductionSource })
   const renderQueue = new RenderQueue(config.exportConcurrency)
 
   const app = Fastify({
@@ -97,7 +97,7 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
   await app.register(outlineRoutes({ db: ownDb, config, service: outlineService, docService: service }))
   await app.register(assetsRoutes({ db: ownDb, config }))
   await app.register(exportsRoutes({ db: ownDb, config, queue: renderQueue }))
-  await app.register(mcpRoutes({ db: ownDb, config, service, queue: renderQueue }))
+  await app.register(mcpRoutes({ db: ownDb, config, service, outline: outlineService, queue: renderQueue }))
 
   // 生产模式：托管前端构建产物。只认包含 index.html 的目录，
   // 开发模式（server 目录下 ./dist 是 esbuild 产物，没有 index.html）自动跳过

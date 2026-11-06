@@ -4,3 +4,9 @@ export function isMcpHomeEntry(search: string): boolean {
   const params = new URLSearchParams(search)
   return !params.get('doc') && !params.get('mode')
 }
+
+// 大纲页签：有 doc 且 tab=outline（不与 mode=outline 混淆——mode 留给 view/export/audience）
+export function isOutlineEntry(search: string): boolean {
+  const params = new URLSearchParams(search)
+  return !!params.get('doc') && params.get('tab') === 'outline'
+}

@@ -24,7 +24,8 @@
 - **凭证体系**：用户 API Key（`pk_…`，供 Agent 与 REST API 使用）+ 每文档的编辑/只读令牌（`X-Doc-Token` 请求头、URL `#t=` hash，供网页端使用）。Key 只在创建时显示一次，管理端永远只显示 Key 前缀。
 - **配额与存储**：按用户配额（文档数、单文档大小、每日导出次数）。文档、修订、上传资产与导出文件全部放在 `DATA_DIR`——SQLite `app.db`（WAL）、`assets/`、`exports/`。
 - **协作**：文档带版本号，写入基于 `baseVersion` 三方合并（冲突返回 409），SSE 推送（`GET /api/docs/:id/events`），批注/评论。
-- **远程 MCP**：`POST /mcp`（Streamable HTTP，无状态）提供创建、编辑、导出演示文稿的工具——`create_presentation`、`add_slides`、`update_elements`、`batch_edit`、`get_changes`、`export_presentation` 等；`get_authoring_guide` 分段返回编写规范（`doc/AI_PPT_SCHEMA.md`）。
+- **制作前大纲（outline）**：每个文档可有一份受限 ProseMirror 大纲（`?doc=…&tab=outline` 页签，编辑/只读令牌与 PPT 共用 `#t=`）。Agent 用 `create_outline`/`edit_outline` 起草，用户在网页批注、逐轮提交反馈（不可变快照），确认后 `begin_presentation_from_outline` 发制作来源；之后所有写页面工具必须携带 `sourceApprovalId`。大纲正文/图片变化会使旧来源失效，批注不影响。大纲图片走 `/assets/` 不可猜测地址，仅被大纲引用的本人资产可读。
+- **远程 MCP**：`POST /mcp`（Streamable HTTP，无状态，唯一端点）提供创建、编辑、导出演示文稿的工具——`create_presentation`、`add_slides`、`update_elements`、`batch_edit`、`get_changes`、`export_presentation` 等；大纲工具 `create_outline`、`get_outline`、`edit_outline`、`get_outline_feedback`、`complete_outline_feedback`、`begin_presentation_from_outline`、`get_outline_asset`；`get_authoring_guide` 分段返回编写规范（`doc/AI_PPT_SCHEMA.md`，含 outline 章节）。
 - **服务端导出**：无头 Chromium（Playwright）复用前端导出运行时渲染 PPTX / PDF / PNG；JSON 导出不走浏览器。
 - **管理端**：独立的 `/admin` 管理台（单独的 Vite 入口 `admin.html`，Vue 3 + Naive UI）+ `pptist-admin` CLI，覆盖用户、Key、配额与 SQLite 在线备份。
 - **Agent 说明页**：不带 `doc` 参数访问根路径 `/` 时，显示面向 Agent 的 MCP 接入说明页而非编辑器（`src/views/McpHome`）。
