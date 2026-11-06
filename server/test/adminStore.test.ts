@@ -74,7 +74,7 @@ describe('admin store：筛选/分页统一状态', () => {
       if (req.url.includes('page=1')) {
         // 慢请求：等手动释放
         return new Promise<Response>(res => {
-          release = () => res(jsonRes({ users: [USER('stale')], total: 1, page: 1, pageSize: 20 })) 
+          release = () => res(jsonRes({ users: [USER('stale')], total: 1, page: 1, pageSize: 20 }))
         })
       }
       return jsonRes({ users: [USER('fresh')], total: 2, page: 2, pageSize: 20 })

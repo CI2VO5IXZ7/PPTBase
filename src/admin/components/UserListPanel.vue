@@ -105,14 +105,14 @@ const users = computed(() => store.users)
 const query = computed({
   get: () => store.query,
   set: (v: string) => {
-    store.query = v 
+    store.query = v
   },
 })
 let debounce = 0
 function onQueryInput() {
   window.clearTimeout(debounce)
   debounce = window.setTimeout(() => {
-    store.setFilters({ query: query.value }) 
+    store.setFilters({ query: query.value })
   }, 250)
 }
 
