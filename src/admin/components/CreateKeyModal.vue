@@ -19,6 +19,10 @@
       </div>
 
       <div class="modal-body">
+        <div class="alert dup" v-if="dupInfo">
+          相同请求此前已创建过该 Key（不再显示完整明文）。如需作废可在下方吊销。
+          <n-button class="dup-revoke" size="tiny" tertiary type="error" @click="$emit('duplicated-revoke', dupInfo!)">吊销此 Key</n-button>
+        </div>
         <div class="alert" role="alert" v-if="errorMsg">{{ errorMsg }}</div>
         <div class="field">
           <label for="ck-label">标签</label>
@@ -46,28 +50,36 @@
 <script lang="ts" setup>
 import { computed, ref, watch } from 'vue'
 import { NButton, NInput, NModal } from 'naive-ui'
+import { nanoid } from 'nanoid'
 
 import { ApiError } from '../api'
 import { IconClose } from '../icons'
 import { useAdminStore } from '../store'
+import type { AdminKey } from '../types'
 
 const props = defineProps<{ show: boolean }>()
 const emit = defineEmits<{
   'update:show': [show: boolean]
-  'created': [payload: { key?: string, label: string | null }]
+  'created': [payload: { key?: string, label: string | null, refreshFailed?: boolean }]
+  'duplicated-revoke': [key: Pick<AdminKey, 'id' | 'label' | 'prefix'>]
 }>()
 
 const store = useAdminStore()
-const userName = computed(() => store.selectedUser?.name ?? '')
+const userName = computed(() => store.detailUser?.name ?? '')
 
 const label = ref('')
 const loading = ref(false)
 const errorMsg = ref('')
+const dupInfo = ref<{ id: string, prefix: string, label: string | null } | null>(null)
+// requestId 生命周期=单次弹窗会话：打开时生成，弹窗内网络重试复用；重开/换用户重置
+let requestId = `ui-${nanoid(21)}`
 
 watch(() => props.show, v => {
   if (v) {
     label.value = ''
     errorMsg.value = ''
+    dupInfo.value = null
+    requestId = `ui-${nanoid(21)}`
   }
 })
 
@@ -82,9 +94,14 @@ async function submit() {
   errorMsg.value = ''
   const trimmed = label.value.trim()
   try {
-    const res = await store.createKey(trimmed || null)
+    const res = await store.createKey(trimmed || null, requestId)
+    if (res.duplicated) {
+      // 同一请求已建过：明文不可再取，明示提示并给吊销入口
+      dupInfo.value = { id: res.id, prefix: res.prefix, label: trimmed || null }
+      return
+    }
     emit('update:show', false)
-    emit('created', { key: res.key, label: trimmed || null })
+    emit('created', { key: res.key, label: trimmed || null, refreshFailed: res.refreshFailed })
   }
   catch (err) {
     errorMsg.value = err instanceof ApiError ? err.message : '创建失败，请稍后重试'
@@ -137,6 +154,16 @@ async function submit() {
   color: var(--adm-red);
   font-size: 12.5px;
 }
+.alert.dup {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--adm-orange-soft);
+  border-color: #F3D2B8;
+  color: #8A5430;
+}
+.dup-revoke { flex-shrink: 0; }
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
 .field label { font-size: 12.5px; color: var(--adm-ink-2); font-weight: 600; }
 .field-hint { font-size: 11.5px; color: var(--adm-ink-4); }

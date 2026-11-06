@@ -35,8 +35,14 @@ export function setAdminPassword(db: Db, password: string): void {
   if (password.length < ADMIN_PASSWORD_MIN_LEN) {
     throw new Error(`管理员密码至少 ${ADMIN_PASSWORD_MIN_LEN} 个字符`)
   }
-  db.prepare('INSERT INTO admin_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(META_PASSWORD, hashPassword(password))
+  // 轮换即撤销全部已有管理员会话（同一事务）；首次设置时本就没有会话，删空表无副作用。
+  // 只动 admin_sessions，不触碰 api_keys 等业务数据。
+  const write = db.transaction(() => {
+    db.prepare('INSERT INTO admin_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run(META_PASSWORD, hashPassword(password))
+    db.prepare('DELETE FROM admin_sessions').run()
+  })
+  write()
 }
 
 // 仅当库里还没有密码时按 ADMIN_INITIAL_PASSWORD 播种；已有时不再覆盖，方便轮换后重启不回退
@@ -112,7 +118,7 @@ export function destroySession(db: Db, session: AdminSessionRow): void {
   db.prepare('DELETE FROM admin_sessions WHERE id = ?').run(session.id)
 }
 
-export function lookupSession(db: Db, config: AppConfig, req: FastifyRequest): AdminSessionRow | undefined {
+export function lookupSession(db: Db, config: AppConfig, req: FastifyRequest, reply?: FastifyReply): AdminSessionRow | undefined {
   const token = readCookie(req, ADMIN_COOKIE)
   // 令牌为定长 base64url，拒绝其它形状避免无谓查询
   if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined
@@ -125,11 +131,13 @@ export function lookupSession(db: Db, config: AppConfig, req: FastifyRequest): A
     destroySession(db, row)
     return undefined
   }
-  // 滑动续期：剩余不足一半时续满整个 TTL
+  // 滑动续期：剩余不足一半时续满整个 TTL，并同步重发 Cookie 的 Max-Age
+  // （同一 token、同样的 HttpOnly/SameSite/Secure 属性，CSRF 令牌不变）
   if (row.expires_at - now < config.adminSessionTtlMs / 2) {
     db.prepare('UPDATE admin_sessions SET expires_at = ?, last_seen_at = ? WHERE id = ?')
       .run(now + config.adminSessionTtlMs, now, row.id)
     row.expires_at = now + config.adminSessionTtlMs
+    reply?.header('set-cookie', sessionCookie(config, token))
   }
   else if (row.last_seen_at === null || now - row.last_seen_at > 60_000) {
     db.prepare('UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?').run(now, row.id)
@@ -137,8 +145,8 @@ export function lookupSession(db: Db, config: AppConfig, req: FastifyRequest): A
   return row
 }
 
-export function requireAdmin(db: Db, config: AppConfig, req: FastifyRequest): AdminSessionRow {
-  const session = lookupSession(db, config, req)
+export function requireAdmin(db: Db, config: AppConfig, req: FastifyRequest, reply?: FastifyReply): AdminSessionRow {
+  const session = lookupSession(db, config, req, reply)
   if (!session) throw AppError.unauthorized('管理员会话无效或已过期')
   return session
 }

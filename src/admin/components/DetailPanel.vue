@@ -17,15 +17,27 @@
             <div class="detail-note">{{ user.note || '无备注' }} · {{ user.docs }} 文档</div>
           </div>
         </div>
-        <n-button
-          size="small"
-          secondary
-          :disabled="!quotaDirty"
-          :loading="savingQuota"
-          @click="saveQuota"
-        >
-          保存配额
-        </n-button>
+        <div class="head-actions">
+          <n-button
+            v-if="anyCustom"
+            size="small"
+            tertiary
+            type="warning"
+            title="清除自定义配额，恢复继承全局默认"
+            @click="resetQuotaToInherit"
+          >
+            恢复默认
+          </n-button>
+          <n-button
+            size="small"
+            secondary
+            :disabled="!quotaDirty"
+            :loading="savingQuota"
+            @click="saveQuota()"
+          >
+            保存配额
+          </n-button>
+        </div>
       </div>
 
       <div class="detail-body">
@@ -183,6 +195,7 @@ import { NButton, NEmpty, NInputNumber, NSpin, useMessage } from 'naive-ui'
 import { ApiError } from '../api'
 import { avatarColor, avatarLetter, formatDate, relativeTime } from '../format'
 import { IconPlus } from '../icons'
+import { buildQuotaPatch, quotaBaseline, type QuotaValues } from '../quotaPatch'
 import { useAdminStore } from '../store'
 import type { AdminKey, AdminUser } from '../types'
 
@@ -194,38 +207,31 @@ defineEmits<{
 
 const store = useAdminStore()
 const message = useMessage()
-const user = computed(() => store.selectedUser)
+const user = computed(() => store.detailUser)
 
-// 配额表单：null = 继承默认；与 quotaCustom 对齐判断是否脏
-const quotaForm = reactive<{ docs: number | null, docMb: number | null, exportsPerDay: number | null }>({
-  docs: null,
-  docMb: null,
-  exportsPerDay: null,
-})
+// 配额表单：展示生效值；只有改动的字段才进 PATCH，未动字段保留 null 继承
+const quotaForm = reactive<QuotaValues>({ docs: null, docMb: null, exportsPerDay: null })
+const quotaBase = reactive<QuotaValues>({ docs: null, docMb: null, exportsPerDay: null })
 
 watch(user, u => {
-  quotaForm.docs = u?.quotaCustom.docs ?? u?.quota.docs ?? null
-  quotaForm.docMb = u?.quotaCustom.docMb ?? u?.quota.docMb ?? null
-  quotaForm.exportsPerDay = u?.quotaCustom.exportsPerDay ?? u?.quota.exportsPerDay ?? null
-  // 展示生效值而不是原始 null，管理员能直接看到当前实际配额；
-  // 清空输入框即可回到继承默认
+  const base = u ? quotaBaseline(u.quotaCustom, u.quota) : { docs: null, docMb: null, exportsPerDay: null }
+  Object.assign(quotaForm, base)
+  Object.assign(quotaBase, base)
 }, { immediate: true })
 
-const quotaDirty = computed(() => {
-  if (!user.value) return false
-  const cur = user.value.quotaCustom
-  const eff = user.value.quota
-  return quotaForm.docs !== (cur.docs ?? eff.docs)
-    || quotaForm.docMb !== (cur.docMb ?? eff.docMb)
-    || quotaForm.exportsPerDay !== (cur.exportsPerDay ?? eff.exportsPerDay)
+const quotaPatch = computed(() => buildQuotaPatch(quotaForm, quotaBase))
+const quotaDirty = computed(() => Object.keys(quotaPatch.value).length > 0)
+const anyCustom = computed(() => {
+  const c = user.value?.quotaCustom
+  return !!c && (c.docs !== null || c.docMb !== null || c.exportsPerDay !== null)
 })
 
 const savingQuota = ref(false)
-async function saveQuota() {
-  if (!user.value || !quotaDirty.value || savingQuota.value) return
+async function saveQuota(patch = quotaPatch.value) {
+  if (!user.value || !Object.keys(patch).length || savingQuota.value) return
   savingQuota.value = true
   try {
-    await store.saveQuota(user.value.id, { ...quotaForm })
+    await store.saveQuota(user.value.id, patch)
     message.success('配额已更新')
   }
   catch (err) {
@@ -234,6 +240,13 @@ async function saveQuota() {
   finally {
     savingQuota.value = false
   }
+}
+
+async function resetQuotaToInherit() {
+  quotaForm.docs = null
+  quotaForm.docMb = null
+  quotaForm.exportsPerDay = null
+  await saveQuota({ quotaDocs: null, quotaDocMb: null, quotaExportsPerDay: null })
 }
 </script>
 
@@ -266,6 +279,7 @@ async function saveQuota() {
 .avatar { width: 42px; height: 42px; font-size: 15px; border-radius: 12px; }
 .detail-name { font-size: 17px; font-weight: 700; }
 .detail-note { font-size: 12.5px; color: var(--adm-ink-3); margin-top: 2px; }
+.head-actions { display: flex; gap: 8px; flex-shrink: 0; }
 
 .detail-body {
   padding: 12px 16px 6px;

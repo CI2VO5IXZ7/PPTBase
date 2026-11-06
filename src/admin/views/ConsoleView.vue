@@ -98,7 +98,7 @@
     </main>
 
     <CreateUserModal v-model:show="createUserOpen" />
-    <CreateKeyModal v-model:show="createKeyOpen" @created="onKeyCreated" />
+    <CreateKeyModal v-model:show="createKeyOpen" @created="onKeyCreated" @duplicated-revoke="confirmRevoke" />
     <NewKeyModal :show="newKeyOpen" :api-key="newKeyValue" :key-label="newKeyLabel" @close="newKeyOpen = false" />
     <ConfirmModal
       v-model:show="confirmOpen"
@@ -156,7 +156,10 @@ const newKeyOpen = ref(false)
 const newKeyValue = ref('')
 const newKeyLabel = ref('')
 
-function onKeyCreated(payload: { key?: string, label: string | null }) {
+function onKeyCreated(payload: { key?: string, label: string | null, refreshFailed?: boolean }) {
+  if (payload.refreshFailed) {
+    message.warning('Key 已创建，但列表刷新失败——请稍后手动刷新查看')
+  }
   if (!payload.key) return
   newKeyValue.value = payload.key
   newKeyLabel.value = payload.label ?? '未命名'
@@ -171,7 +174,7 @@ const confirmText = ref('')
 const confirmLoading = ref(false)
 let confirmAction: (() => Promise<void>) | null = null
 
-function confirmRevoke(key: AdminKey) {
+function confirmRevoke(key: Pick<AdminKey, 'id' | 'label' | 'prefix'>) {
   const label = key.label || key.prefix
   confirmTitle.value = `吊销 Key「${label}」？`
   confirmLines.value = [
@@ -193,7 +196,7 @@ function confirmToggle(user: AdminUser) {
   confirmLines.value = disabling
     ? [
       '该用户的全部 Key 与文档链接将立即失效：Agent 调用返回 401，网页端编辑/只读链接全部失效。',
-      `当前有 ${user.activeKeys} 把有效 Key、${user.docs} 份文档会受影响。`,
+      `当前有 ${user.totalKeys} 把 Key、${user.docs} 份文档会受影响。`,
       '停用后可随时恢复，未被单独吊销的 Key 与文档链接会重新生效。',
     ]
     : [

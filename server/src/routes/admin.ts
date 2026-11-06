@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify'
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify'
 import { nanoid } from 'nanoid'
 
 import {
@@ -101,7 +101,7 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
 
   const userOut = (row: {
     id: string, name: string, note: string | null, status: string, created_at: number,
-    docs: number, active_keys: number, last_used: number | null,
+    docs: number, total_keys: number, active_keys: number, last_used: number | null,
     quota_docs: number | null, quota_doc_bytes: number | null, quota_exports_per_day: number | null,
     key_prefix: string | null,
   }) => {
@@ -113,6 +113,7 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       status: row.status,
       createdAt: row.created_at,
       docs: row.docs,
+      totalKeys: row.total_keys,
       activeKeys: row.active_keys,
       lastUsedAt: row.last_used,
       keyPrefix: row.key_prefix,
@@ -128,7 +129,8 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
   const USER_SELECT = `
     SELECT u.*,
       (SELECT COUNT(*) FROM documents d WHERE d.owner_id = u.id) AS docs,
-      (SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id AND k.revoked_at IS NULL) AS active_keys,
+      (SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id) AS total_keys,
+      (SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id AND k.revoked_at IS NULL AND u.status = 'active') AS active_keys,
       (SELECT MAX(k.last_used_at) FROM api_keys k WHERE k.user_id = u.id) AS last_used,
       (SELECT k.prefix FROM api_keys k WHERE k.user_id = u.id AND k.revoked_at IS NULL
         ORDER BY k.last_used_at DESC LIMIT 1) AS key_prefix
@@ -153,7 +155,7 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
         return
       }
       try {
-        const session = requireAdmin(db, config, req)
+        const session = requireAdmin(db, config, req, _reply)
         verifyAdminCsrf(config, req, session)
         ;(req as FastifyRequest & { adminSession?: AdminSessionRow }).adminSession = session
         done()
@@ -163,9 +165,9 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       }
     })
 
-    const sessionOf = (req: FastifyRequest): AdminSessionRow =>
+    const sessionOf = (req: FastifyRequest, reply: FastifyReply): AdminSessionRow =>
       (req as FastifyRequest & { adminSession?: AdminSessionRow }).adminSession
-      ?? requireAdmin(db, config, req)
+      ?? requireAdmin(db, config, req, reply)
 
     app.post('/api/admin/login', (req, reply) => {
       if (!loginLimiter.check('ip:' + req.ip)) {
@@ -186,24 +188,25 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
     })
 
     app.post('/api/admin/logout', (req, reply) => {
-      const session = sessionOf(req)
+      const session = sessionOf(req, reply)
       destroySession(db, session)
       clearAdminCookie(reply, config)
       return { ok: true }
     })
 
-    app.get('/api/admin/session', req => {
-      const session = sessionOf(req)
+    app.get('/api/admin/session', (req, reply) => {
+      const session = sessionOf(req, reply)
       return { authenticated: true, csrfToken: session.csrf_token, expiresAt: session.expires_at }
     })
 
-    app.get('/api/admin/overview', req => {
-      sessionOf(req)
+    app.get('/api/admin/overview', (req, reply) => {
+      sessionOf(req, reply)
       const users = db.prepare(
         "SELECT COUNT(*) AS total, SUM(status = 'active') AS active FROM users"
       ).get() as { total: number, active: number | null }
+      // 有效 Key = 未吊销 且 所属用户处于 active（停用用户的 Key 实际已不可用）
       const keys = db.prepare(
-        'SELECT COUNT(*) AS total, SUM(revoked_at IS NULL) AS active FROM api_keys'
+        "SELECT COUNT(*) AS total, SUM(k.revoked_at IS NULL AND u.status = 'active') AS active FROM api_keys k JOIN users u ON u.id = k.user_id"
       ).get() as { total: number, active: number | null }
       const docs = db.prepare('SELECT COUNT(*) AS n FROM documents').get() as { n: number }
       const midnight = new Date()
@@ -218,10 +221,21 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       }
     })
 
-    app.get('/api/admin/users', req => {
-      sessionOf(req)
-      const q = ((req.query as { q?: string }).q ?? '').trim().slice(0, 100)
-      const status = (req.query as { status?: string }).status ?? 'all'
+    app.get('/api/admin/users', (req, reply) => {
+      sessionOf(req, reply)
+      const query = req.query as { q?: string, status?: string, page?: string, pageSize?: string }
+      const q = (query.q ?? '').trim().slice(0, 100)
+      const status = query.status ?? 'all'
+
+      const num = (v: string | undefined, fallback: number): number => {
+        if (v === undefined || v === '') return fallback
+        const n = Number(v)
+        if (!Number.isInteger(n) || n < 1) throw AppError.validation('分页参数需为正整数')
+        return n
+      }
+      const page = num(query.page, 1)
+      const pageSize = Math.min(num(query.pageSize, 20), 200)
+
       const clauses: string[] = []
       const params: unknown[] = []
       if (q) {
@@ -233,14 +247,16 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
         clauses.push('u.status = ?')
         params.push(status)
       }
+      const where = clauses.length ? ' WHERE ' + clauses.join(' AND ') : ''
+      const total = (db.prepare(`SELECT COUNT(*) AS n FROM users u${where}`).get(...params) as { n: number }).n
       const rows = db.prepare(
-        `${USER_SELECT}${clauses.length ? ' WHERE ' + clauses.join(' AND ') : ''} ORDER BY u.created_at LIMIT 500`
-      ).all(...params)
-      return { users: (rows as Parameters<typeof userOut>[0][]).map(userOut) }
+        `${USER_SELECT}${where} ORDER BY u.created_at LIMIT ? OFFSET ?`
+      ).all(...params, pageSize, (page - 1) * pageSize)
+      return { users: (rows as Parameters<typeof userOut>[0][]).map(userOut), total, page, pageSize }
     })
 
-    app.post('/api/admin/users', req => {
-      sessionOf(req)
+    app.post('/api/admin/users', (req, reply) => {
+      sessionOf(req, reply)
       const body = (req.body ?? {}) as Record<string, unknown>
       const name = strField(body, 'name', 64, true)!
       if (!NAME_PATTERN.test(name)) {
@@ -261,8 +277,8 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       return { user: userOut(row) }
     })
 
-    app.patch('/api/admin/users/:id', req => {
-      sessionOf(req)
+    app.patch('/api/admin/users/:id', (req, reply) => {
+      sessionOf(req, reply)
       const user = mustGetUser(db, userId(req))
       const body = (req.body ?? {}) as Record<string, unknown>
       const docs = quotaField(body, 'quotaDocs', QUOTA_LIMITS.docs)
@@ -286,8 +302,8 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       return { user: userOut(row) }
     })
 
-    app.post('/api/admin/users/:id/status', req => {
-      sessionOf(req)
+    app.post('/api/admin/users/:id/status', (req, reply) => {
+      sessionOf(req, reply)
       const user = mustGetUser(db, userId(req))
       const body = (req.body ?? {}) as Record<string, unknown>
       const status = body.status
@@ -299,16 +315,16 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       return { ok: true, status, already }
     })
 
-    app.get('/api/admin/users/:id/keys', req => {
-      sessionOf(req)
+    app.get('/api/admin/users/:id/keys', (req, reply) => {
+      sessionOf(req, reply)
       const user = mustGetUser(db, userId(req))
       const rows = db.prepare('SELECT * FROM api_keys WHERE user_id = ? ORDER BY created_at')
         .all(user.id) as ApiKeyRow[]
       return { keys: rows.map(keyOut) }
     })
 
-    app.post('/api/admin/users/:id/keys', req => {
-      sessionOf(req)
+    app.post('/api/admin/users/:id/keys', (req, reply) => {
+      sessionOf(req, reply)
       const user = mustGetUser(db, userId(req))
       if (user.status !== 'active') throw AppError.conflict('用户已停用，请先恢复后再创建 Key')
       const body = (req.body ?? {}) as Record<string, unknown>
@@ -336,8 +352,8 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       }
     })
 
-    app.post('/api/admin/keys/:id/revoke', req => {
-      sessionOf(req)
+    app.post('/api/admin/keys/:id/revoke', (req, reply) => {
+      sessionOf(req, reply)
       const keyId = userId(req)
       const result = db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
         .run(Date.now(), keyId)

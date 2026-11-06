@@ -78,8 +78,8 @@ node dist/admin.js backup <目标文件>                 # SQLite 在线备份�
 | `POST /api/admin/login` `{password}` | 建会话，Set-Cookie + 返回 `{csrfToken, expiresAt}` |
 | `POST /api/admin/logout` | 销毁会话并清 Cookie |
 | `GET /api/admin/session` | `{authenticated, csrfToken, expiresAt}` |
-| `GET /api/admin/overview` | 活跃/总用户、有效/总 Key、文档数、今日导出（真实数据） |
-| `GET /api/admin/users?q=&status=` | 用户列表（文档数、有效 Key 数、最近使用、配额） |
+| `GET /api/admin/overview` | 活跃/总用户、有效/总 Key（排除停用用户）、文档数、今日导出（真实数据） |
+| `GET /api/admin/users?q=&status=&page=&pageSize=` | 用户列表分页 `{users,total,page,pageSize}`（文档数、可用/总 Key 数、最近使用、配额；pageSize ≤200，默认 20） |
 | `POST /api/admin/users` `{name, note?}` | 创建用户；重名 409 |
 | `PATCH /api/admin/users/:id` `{quotaDocs?, quotaDocMb?, quotaExportsPerDay?}` | 改配额；`null` = 恢复继承默认 |
 | `POST /api/admin/users/:id/status` `{status}` | `active`/`disabled` 停用/启用；停用即全部 Key 与文档链接失效，启用恢复未吊销 Key |

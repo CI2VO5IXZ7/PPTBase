@@ -76,12 +76,22 @@
         </tbody>
       </table>
     </div>
+    <div class="pager" v-if="store.usersTotal > store.pageSize">
+      <n-pagination
+        :page="store.page"
+        :item-count="store.usersTotal"
+        :page-size="store.pageSize"
+        size="small"
+        @update:page="store.setPage"
+      />
+      <span class="pager-total">共 {{ store.usersTotal }} 个用户</span>
+    </div>
   </section>
 </template>
 
 <script lang="ts" setup>
 import { computed, ref } from 'vue'
-import { NEmpty, NSelect, NSpin } from 'naive-ui'
+import { NEmpty, NPagination, NSelect, NSpin } from 'naive-ui'
 
 import { useAdminStore } from '../store'
 import type { AdminUser } from '../types'
@@ -112,7 +122,7 @@ function onStatusChange(value: string) {
 }
 
 function rowNote(user: AdminUser): string {
-  const bits = [user.note, `${user.docs} 文档`, `${user.activeKeys} 把 Key`].filter(Boolean)
+  const bits = [user.note, `${user.docs} 文档`, `${user.totalKeys} 把 Key`].filter(Boolean)
   return bits.join(' · ')
 }
 </script>
@@ -156,6 +166,14 @@ function rowNote(user: AdminUser): string {
 .status-select { width: 118px; flex-shrink: 0; }
 
 .table-wrap { flex: 1; overflow: auto; }
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-top: 1px solid var(--adm-line);
+}
+.pager-total { font-size: 12px; color: var(--adm-ink-4); }
 .state-box {
   display: flex;
   align-items: center;

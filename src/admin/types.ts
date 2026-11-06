@@ -17,6 +17,7 @@ export interface AdminUser {
   status: 'active' | 'disabled'
   createdAt: number
   docs: number
+  totalKeys: number
   activeKeys: number
   lastUsedAt: number | null
   keyPrefix: string | null
@@ -38,4 +39,11 @@ export interface Overview {
   keys: { total: number, active: number }
   docs: number
   exportsToday: number
+}
+
+export interface UsersPage {
+  users: AdminUser[]
+  total: number
+  page: number
+  pageSize: number
 }

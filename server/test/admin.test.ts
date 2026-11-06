@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { ADMIN_COOKIE } from '../src/adminAuth'
+import { ADMIN_COOKIE, setAdminPassword } from '../src/adminAuth'
 import type { Db } from '../src/db'
 import { auth, createDoc, createUser, makeApp, tokenFromUrl, tokenHeader, type TestContext } from './helpers'
 
@@ -328,5 +328,126 @@ describe('管理台用户与 Key', () => {
 
     expect((await authed(ctx, 'GET', '/api/admin/users/nope/keys', session)).statusCode).toBe(404)
     expect((await authed(ctx, 'POST', '/api/admin/keys/nope/revoke', session)).statusCode).toBe(404)
+  })
+})
+
+describe('管理台补充行为', () => {
+  let ctx: TestContext
+  let session: AdminSession
+  beforeAll(async () => {
+    ctx = await makeApp({ ADMIN_INITIAL_PASSWORD: PASSWORD })
+    session = await adminLogin(ctx)
+  })
+  afterAll(async () => {
+    await ctx.app.close()
+  })
+
+  it('滑动续期：剩余不足一半时同步重发 Cookie Max-Age（同一 token，CSRF 不变）', async () => {
+    const ttl = ctx.config.adminSessionTtlMs
+    ctx.db.prepare('UPDATE admin_sessions SET expires_at = ? WHERE csrf_token = ?')
+      .run(Date.now() + ttl * 0.4, session.csrf)
+    const res = await ctx.app.inject({
+      method: 'GET', url: '/api/admin/session',
+      headers: { cookie: session.cookie },
+    })
+    expect(res.statusCode).toBe(200)
+    const setCookie = res.headers['set-cookie'] as string
+    // 同一 token 重新下发，属性与初始 Cookie 一致
+    expect(setCookie).toContain(session.cookie)
+    expect(setCookie).toContain('HttpOnly')
+    expect(setCookie).toContain('SameSite=Strict')
+    const maxAge = Number(/Max-Age=(\d+)/.exec(setCookie)?.[1])
+    expect(maxAge).toBeGreaterThan(ttl / 1000 * 0.9)
+    // CSRF 令牌不变
+    expect(res.json().csrfToken).toBe(session.csrf)
+  })
+
+  it('密码轮换撤销全部管理员会话，业务 Key 不受影响', async () => {
+    const alice = createUser(ctx, 'rotate-biz')
+    const other = await adminLogin(ctx)
+
+    setAdminPassword(ctx.db, 'rotated-admin-pass-2')
+
+    // 旧会话立即失效
+    const stale = await ctx.app.inject({
+      method: 'GET', url: '/api/admin/session', headers: { cookie: other.cookie },
+    })
+    expect(stale.statusCode).toBe(401)
+    // 业务 api_keys 未被误伤：仍能正常鉴权
+    const docs = await ctx.app.inject({ method: 'GET', url: '/api/docs', headers: auth(alice.key) })
+    expect(docs.statusCode).toBe(200)
+    // 新密码可登录，旧密码失败
+    const oldTry = await ctx.app.inject({ method: 'POST', url: '/api/admin/login', payload: { password: PASSWORD } })
+    expect(oldTry.statusCode).toBe(401)
+    const newTry = await ctx.app.inject({ method: 'POST', url: '/api/admin/login', payload: { password: 'rotated-admin-pass-2' } })
+    expect(newTry.statusCode).toBe(200)
+    // 恢复密码供后续用例
+    setAdminPassword(ctx.db, PASSWORD)
+    session = await adminLogin(ctx)
+  })
+
+  it('概览有效 Key 排除停用用户；activeKeys 与可用状态一致', async () => {
+    const res = await authed(ctx, 'POST', '/api/admin/users', session, { name: 'count-user' })
+    const { user } = res.json() as { user: { id: string } }
+    await authed(ctx, 'POST', `/api/admin/users/${user.id}/keys`, session, { label: 'a' })
+
+    let ov = (await authed(ctx, 'GET', '/api/admin/overview', session)).json() as { keys: { active: number } }
+    const before = ov.keys.active
+
+    await authed(ctx, 'POST', `/api/admin/users/${user.id}/status`, session, { status: 'disabled' })
+    ov = (await authed(ctx, 'GET', '/api/admin/overview', session)).json() as { keys: { active: number } }
+    expect(ov.keys.active).toBe(before - 1)
+
+    const list = (await authed(ctx, 'GET', '/api/admin/users?q=count-user', session)).json() as { users: { activeKeys: number, totalKeys: number }[] }
+    expect(list.users[0].activeKeys).toBe(0)
+    expect(list.users[0].totalKeys).toBe(1)
+
+    // 恢复后计数一致回升
+    await authed(ctx, 'POST', `/api/admin/users/${user.id}/status`, session, { status: 'active' })
+    ov = (await authed(ctx, 'GET', '/api/admin/overview', session)).json() as { keys: { active: number } }
+    expect(ov.keys.active).toBe(before)
+    const list2 = (await authed(ctx, 'GET', '/api/admin/users?q=count-user', session)).json() as { users: { activeKeys: number }[] }
+    expect(list2.users[0].activeKeys).toBe(1)
+  })
+
+  it('分页返回 metadata，>500 用户完整可翻页', async () => {
+    const insert = ctx.db.prepare('INSERT INTO users (id, name, status, created_at) VALUES (?, ?, ?, ?)')
+    const seed = ctx.db.transaction(() => {
+      for (let i = 0; i < 505; i++) {
+        insert.run(`bulk-${i}`, `bulk-${String(i).padStart(4, '0')}`, 'active', 1)
+      }
+    })
+    seed()
+
+    const page1 = (await authed(ctx, 'GET', '/api/admin/users?pageSize=20&page=1', session)).json() as { users: unknown[], total: number, page: number, pageSize: number }
+    expect(page1.users).toHaveLength(20)
+    expect(page1.total).toBeGreaterThanOrEqual(505)
+    expect(page1.page).toBe(1)
+    expect(page1.pageSize).toBe(20)
+
+    const last = (await authed(ctx, 'GET', '/api/admin/users?pageSize=200&page=3', session)).json() as { users: unknown[], total: number }
+    expect(last.users.length).toBeGreaterThan(0)
+    expect(last.users.length).toBeLessThanOrEqual(200)
+
+    const filtered = (await authed(ctx, 'GET', '/api/admin/users?q=bulk-&pageSize=200&page=3', session)).json() as { users: unknown[], total: number }
+    expect(filtered.total).toBe(505)
+    expect(filtered.users).toHaveLength(105)
+
+    const bad = await authed(ctx, 'GET', '/api/admin/users?page=0', session)
+    expect(bad.statusCode).toBe(400)
+  })
+
+  it('配额 PATCH 只落提供字段，未提供字段保持原状', async () => {
+    const res = await authed(ctx, 'POST', '/api/admin/users', session, { name: 'quota-partial' })
+    const { user } = res.json() as { user: { id: string } }
+    await authed(ctx, 'PATCH', `/api/admin/users/${user.id}`, session, { quotaDocMb: 25 })
+
+    // 只 PATCH docs：docMb 自定义保留，exports 仍为继承
+    const r = await authed(ctx, 'PATCH', `/api/admin/users/${user.id}`, session, { quotaDocs: 3 })
+    expect(r.statusCode).toBe(200)
+    expect(r.json().user.quotaCustom).toEqual({ docs: 3, docMb: 25, exportsPerDay: null })
+    const row = ctx.db.prepare('SELECT * FROM users WHERE id = ?').get(user.id) as { quota_doc_bytes: number | null, quota_exports_per_day: number | null }
+    expect(row.quota_doc_bytes).toBe(25 * 1024 * 1024)
+    expect(row.quota_exports_per_day).toBeNull()
   })
 })
