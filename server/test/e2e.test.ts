@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { auth, createDoc, createUser, makeApp, slide, textElement, type TestContext } from './helpers'
 
 // §九 M4 端到端：真实 Chromium 走无头导出页导出 PDF / PPTX / PNG
-// 默认跳过；E2E=1 且 RENDER_BASE_URL 指向可达的 PPTist 前端（vite dev 或已构建的静态托管）时运行
+// 默认跳过；E2E=1 且 RENDER_BASE_URL 指向可达的 PPTBase 前端（vite dev 或已构建的静态托管）时运行
 const E2E = process.env.E2E === '1'
 const RENDER_BASE_URL = process.env.RENDER_BASE_URL ?? 'http://127.0.0.1:5173'
 

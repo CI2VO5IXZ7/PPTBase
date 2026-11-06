@@ -1,7 +1,7 @@
 <template>
   <div class="mcp-home">
     <div class="card">
-      <h1>PPTist · Agent 接入（MCP）</h1>
+      <h1>PPTBase · Agent 接入（MCP）</h1>
       <p class="intro">
         本服务为 AI Agent 提供远程 MCP 端点，用于创建和修改演示文稿；文档由用户在网页端查看与编辑。
         如果你是文档使用者，请打开 Agent 返回的编辑链接（形如 <code>?doc=…#t=…</code>）。
@@ -18,7 +18,7 @@
 
       <h2>客户端配置示例</h2>
       <pre>mcp_servers:
-  pptist:
+  pptbase:
     url: {{ mcpEndpoint }}
     headers:
       Authorization: Bearer pk_...</pre>

@@ -1,5 +1,5 @@
 // MCP 服务说明（会注入 Agent 的系统提示，硬上限 32KB，保持精简）
-export const MCP_INSTRUCTIONS = `你是 PPTist 的编排 Agent。本服务替用户保管演示文稿，你通过 MCP 工具创建和修改文档，用户在网页端查看和编辑。坐标系：页面固定为 1000×562.5 逻辑像素，原点在左上角。
+export const MCP_INSTRUCTIONS = `你是 PPTBase 的编排 Agent。本服务替用户保管演示文稿，你通过 MCP 工具创建和修改文档，用户在网页端查看和编辑。坐标系：页面固定为 1000×562.5 逻辑像素，原点在左上角。
 
 ## 推荐工作流
 1. 先调 get_authoring_guide（不传参数看目录，再按 section 取所需章节，如 text / shape / image / table / chart / richtext / fonts / example）。

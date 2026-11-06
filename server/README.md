@@ -1,10 +1,10 @@
-# PPTist Server
+# PPTBase Server
 
-PPTist 的服务端：多用户（每人一个 Key）文档服务，供 Agent 和网页端调用。
+PPTBase 的服务端：多用户（每人一个 Key）文档服务，供 Agent 和网页端调用。
 
 - 数据全部放在 `DATA_DIR`：SQLite（`app.db`，WAL）、`assets/`、`secret`（首次启动自动生成，权限 0600）
 - 三类凭证：用户 Key（`pk_…`，Agent 用）、文档编辑令牌、文档只读令牌（网页端用，`X-Doc-Token` 请求头）
-- 文档数据 = PPTist `exportJSON` 格式 `{ title, theme, viewportSize, viewportRatio, slides }`，类型直接复用 `src/types/slides.ts`
+- 文档数据 = PPTBase `exportJSON` 格式 `{ title, theme, viewportSize, viewportRatio, slides }`，类型直接复用 `src/types/slides.ts`
 
 ## 本地开发
 
@@ -160,7 +160,7 @@ Hermes（`~/.hermes/config.yaml` 的 `mcp_servers`）：
 
 ```yaml
 mcp_servers:
-  pptist:
+  pptbase:
     url: https://你的域名/mcp
     headers:
       Authorization: Bearer pk_...
@@ -170,7 +170,7 @@ DeepSeek Harness（`dsh-mcp-client`，工具调用超时保持默认 60s 即可�
 
 ```yaml
 mcp_servers:
-  pptist:
+  pptbase:
     transport: streamable-http
     url: https://你的域名/mcp
     headers:
@@ -181,7 +181,7 @@ Grok Bot（远程 MCP，具体字段名以它的文档为准）：
 
 ```yaml
 mcp_servers:
-  pptist:
+  pptbase:
     url: https://你的域名/mcp
     headers:
       Authorization: Bearer pk_...
@@ -229,8 +229,8 @@ docker compose down
 > 以下步骤对任何装有 Docker 的 Linux 主机通用（4C8G + Caddy 公网方案作为参考）。真实域名、Key、证书一律不入库。
 
 1. 同步代码到主机：`git clone` 或 `git pull`。
-2. （启用 HTTPS 时）DNS 把 `pptist.example.com` 换成真实域名并解析到主机；防火墙/安全组放行 80、443。应用端口 3100 只需容器网络内部可达；宿主映射避开 3000/3030/4000。
-3. 编辑 `Caddyfile` 把 `pptist.example.com` 换成真实域名；`docker-compose.yml` 里 `PUBLIC_BASE_URL` 改为 `https://你的域名`。`RENDER_BASE_URL` 保持 `http://127.0.0.1:3100`（容器内自指）。
+2. （启用 HTTPS 时）DNS 把 `pptbase.example.com` 换成真实域名并解析到主机；防火墙/安全组放行 80、443。应用端口 3100 只需容器网络内部可达；宿主映射避开 3000/3030/4000。
+3. 编辑 `Caddyfile` 把 `pptbase.example.com` 换成真实域名；`docker-compose.yml` 里 `PUBLIC_BASE_URL` 改为 `https://你的域名`。`RENDER_BASE_URL` 保持 `http://127.0.0.1:3100`（容器内自指）。
 4. 启动：`docker compose --profile https up -d`；宿主 80/443 被占或不需 HTTPS 时，去掉 `--profile https` 仅起 app。
 5. 首个用户：`docker compose exec app pptist-admin user create <name>`，保存输出的 `pk_` Key（只显示一次）。
 6. 按「客户端配置」把 `https://你的域名/mcp` + `Authorization: Bearer pk_…` 配进 Agent。

@@ -90,7 +90,7 @@ function requestOnce(url: URL, maxBytes: number): Promise<{ status: number, head
       method: 'GET',
       lookup: makeLookup(),
       timeout: TIMEOUT_MS,
-      headers: { 'user-agent': 'pptist-server/0.1', 'accept': 'image/*,*/*;q=0.8' },
+      headers: { 'user-agent': 'pptbase-server/0.1', 'accept': 'image/*,*/*;q=0.8' },
     }, res => {
       const chunks: Buffer[] = []
       let size = 0
