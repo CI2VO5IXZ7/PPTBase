@@ -122,7 +122,7 @@ describe('大纲锚点映射', () => {
     const t = rangeThread(doc, 'b2', 0, 6)
     const { doc: newDoc, threads } = applyAndMap(json, [t], tr => {
       const moved = applyContentOps(tr.doc, [{ op: 'moveBlock', blockId: 'b2', after: 'b3' }])
-      for (const step of moved.steps) tr.step(step)
+      for (const step of moved.tr.steps) tr.step(step)
     })
     const frag = threads[0].anchor.fragments![0]
     expect(threads[0].detached).toBe(false)
@@ -162,6 +162,20 @@ describe('大纲锚点映射', () => {
       tr.delete(ref.pos, ref.pos + ref.node.nodeSize)
     })
     expect(threads[0].detached).toBe(true)
+  })
+
+  it('image 锚点在同 blockId 被替换为非图片节点后 detached', () => {
+    const img = { type: 'image', attrs: { blockId: 'im', src: '/assets/abc.png', alt: '', caption: '图', usage: 'reference', usageDescription: '' } }
+    const json = { type: 'doc', content: [para('b1', 'x'), img] }
+    const doc = docNode(json)
+    const t = threadWith(doc, { kind: 'image', blockId: 'im' })
+    const { threads } = applyAndMap(json, [t], tr => {
+      const res = applyContentOps(tr.doc, [{ op: 'replaceBlock', blockId: 'im', block: para('im', '变成段落') }])
+      for (const step of res.tr.steps) tr.step(step)
+    })
+    expect(threads[0].detached).toBe(true)
+    // 引用原文（图片说明）仍保留
+    expect(threads[0].anchor.quote?.text).toBe('图')
   })
 
   it('emoji/代理对按编辑器位置语义处理', () => {

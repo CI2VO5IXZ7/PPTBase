@@ -239,10 +239,10 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
 
   function applyTransform(
     row: OutlineRow,
-    build: (doc: PMNode) => Transform,
-  ): { newDoc: PMNode, contentJson: string, threads: OutlineThread[], threadsJson: string, contentChanged: boolean, threadsChanged: boolean, normalized: boolean } {
+    build: (doc: PMNode) => { tr: Transform, modifiedIds?: Set<string> },
+  ): { newDoc: PMNode, contentJson: string, threads: OutlineThread[], threadsJson: string, contentChanged: boolean, threadsChanged: boolean, normalized: boolean, modifiedIds: Set<string> } {
     const doc = parseContent(row.content)
-    const tr = build(doc)
+    const { tr, modifiedIds } = build(doc)
     const json = tr.doc.toJSON() as { type: string, [k: string]: unknown }
     const { doc: newDoc, normalized } = finalizeJson(json, mustGetDoc(row.doc_id).owner_id)
     const threads = parseThreads(row.threads)
@@ -259,10 +259,11 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
       contentChanged: contentJson !== row.content,
       threadsChanged: threadsJson !== row.threads,
       normalized,
+      modifiedIds: modifiedIds ?? new Set(),
     }
   }
 
-  function applyThreadOps(threads: OutlineThread[], ops: OutlineOp[], doc: PMNode, access: DocAccess, contentVersion: number): string[] {
+  function applyThreadOps(threads: OutlineThread[], ops: OutlineOp[], doc: PMNode, access: DocAccess, contentVersion: number, modifiedIds: Set<string>): string[] {
     const summary: string[] = []
     const find = (threadId: string, i: number): OutlineThread => {
       const thread = threads.find(t => t.id === threadId)
@@ -274,6 +275,14 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
       if (op.op === 'addComment') {
         if (threads.length >= OUTLINE_LIMITS.maxThreads) {
           throw AppError.validation(`批注数量超过上限 ${OUTLINE_LIMITS.maxThreads}`)
+        }
+        // 同批次中目标区块已被改写/删除时锚点语义歧义，拒绝混合提交
+        const anchorIds = op.anchor.kind === 'document' ? []
+          : op.anchor.kind === 'textRange' ? op.anchor.fragments.map(f => f.blockId)
+            : [op.anchor.blockId]
+        const hit = anchorIds.find(id => modifiedIds.has(id))
+        if (hit) {
+          throw AppError.validation(`ops[${i}]: 锚点区块 ${hit} 在本批次中已被修改，请分开提交批注`)
         }
         let anchor: OutlineAnchor
         try {
@@ -330,8 +339,19 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
     // 初始化：已存在返回 existing:true（幂等可重试），不覆盖
     init(access: DocAccess, docId: string, body: OutlineInitBody) {
       mustGetDoc(docId)
+      const hash = body.requestId ? requestHash('init', { content: body.content ?? null }) : null
       const existing = db.prepare('SELECT doc_id FROM outlines WHERE doc_id = ?').get(docId)
-      if (existing) return { existing: true, ...get(access, docId) }
+      if (existing) {
+        // requestId 已用过：相同负载返回既有结果，不同负载报冲突（以修订表 request_hash 为准）
+        if (body.requestId) {
+          const rev = db.prepare('SELECT request_hash FROM outline_revisions WHERE doc_id = ? AND request_id = ?')
+            .get(docId, body.requestId) as { request_hash: string | null } | undefined
+          if (rev && rev.request_hash !== hash) {
+            throw AppError.conflict('相同的 requestId 已用于不同内容的请求', { requestId: body.requestId })
+          }
+        }
+        return { existing: true, ...get(access, docId) }
+      }
 
       const docRow = mustGetDoc(docId)
       const raw = (body.content ?? defaultOutlineDocJson()) as { type: string, [k: string]: unknown }
@@ -344,7 +364,6 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
       if (docRow.size + size + snapshot.length > quota.docBytes) {
         throw AppError.docTooLarge('文档与大纲合计超过大小限制')
       }
-      const hash = body.requestId ? requestHash('init', { content: body.content }) : null
       const now = Date.now()
       const write = db.transaction(() => {
         db.prepare(
@@ -397,7 +416,7 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
             throw AppError.validation(`steps[${i}] 无法应用（位置或结构不匹配）: ${(err as Error).message}`)
           }
         }
-        return tr
+        return { tr }
       })
 
       if (!result.contentChanged && !result.threadsChanged) {
@@ -428,7 +447,7 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
 
       const result = applyTransform(row, doc => applyContentOps(doc, body.ops))
       const nextContentVersion = row.content_version + (result.contentChanged ? 1 : 0)
-      const opSummary = applyThreadOps(result.threads, body.ops, result.newDoc, access, nextContentVersion)
+      const opSummary = applyThreadOps(result.threads, body.ops, result.newDoc, access, nextContentVersion, result.modifiedIds)
       const threadsJson = JSON.stringify(result.threads)
       const threadsChanged = threadsJson !== row.threads
 
@@ -470,7 +489,8 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
 
       const doc = mustGetDoc(docId)
       const snapshot = makeSnapshot(row.content, row.threads)
-      checkBudget(doc.owner_id, docId, row.size, snapshot.length)
+      // 提交同时写 subtype 快照与修订快照，预算计两份
+      checkBudget(doc.owner_id, docId, row.size, snapshot.length * 2)
       const id = nanoid(12)
       const now = Date.now()
       const version = row.version + 1
@@ -593,7 +613,8 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
 
       const doc = mustGetDoc(docId)
       const snapshot = makeSnapshot(row.content, row.threads)
-      checkBudget(doc.owner_id, docId, row.size, snapshot.length)
+      // 确认同时写 subtype 快照与修订快照，预算计两份
+      checkBudget(doc.owner_id, docId, row.size, snapshot.length * 2)
       const id = nanoid(12)
       const now = Date.now()
       const version = row.version + 1

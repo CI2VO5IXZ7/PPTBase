@@ -44,22 +44,36 @@ export function isContentOp(op: OutlineOp): boolean {
   return op.op !== 'addComment' && op.op !== 'replyComment' && op.op !== 'setThreadStatus'
 }
 
-export function applyContentOps(doc: PMNode, ops: OutlineOp[]): Transform {
+export interface ContentOpsResult {
+  tr: Transform
+  // 本批次中被改写/删除的 blockId（删除含子树内全部 blockId）。
+  // 同批次对这些区块新建批注会产生歧义，须拒绝
+  modifiedIds: Set<string>
+}
+
+function collectSubtreeIds(node: PMNode, out: Set<string>): void {
+  const id = node.attrs.blockId
+  if (typeof id === 'string' && id) out.add(id)
+  node.forEach(child => collectSubtreeIds(child, out))
+}
+
+export function applyContentOps(doc: PMNode, ops: OutlineOp[]): ContentOpsResult {
   const tr = new Transform(doc)
+  const modifiedIds = new Set<string>()
   ops.forEach((op, i) => {
     if (!isContentOp(op)) return
     try {
-      applyContentOp(tr, op, i)
+      applyContentOp(tr, op, i, modifiedIds)
     }
     catch (err) {
       if (err instanceof AppError) throw err
       throw AppError.validation(`ops[${i}]: ${(err as Error).message}`)
     }
   })
-  return tr
+  return { tr, modifiedIds }
 }
 
-function applyContentOp(tr: Transform, op: OutlineOp, i: number): void {
+function applyContentOp(tr: Transform, op: OutlineOp, i: number, modifiedIds: Set<string>): void {
   const w = where(i)
   const doc = tr.doc
 
@@ -85,6 +99,7 @@ function applyContentOp(tr: Transform, op: OutlineOp, i: number): void {
     case 'replaceBlock': {
       const ref = requireBlock(doc, op.blockId, w)
       const node = nodeFromJson(op.block, `${w}.block`)
+      modifiedIds.add(ref.blockId)
       try {
         tr.replace(ref.pos, ref.pos + ref.node.nodeSize, new Slice(Fragment.from(node), 0, 0))
       }
@@ -104,6 +119,7 @@ function applyContentOp(tr: Transform, op: OutlineOp, i: number): void {
       for (const key of keys) {
         if (!allowed.has(key)) throw AppError.validation(`${w}: 属性 ${key} 不允许修改`)
       }
+      modifiedIds.add(ref.blockId)
       try {
         tr.setNodeMarkup(ref.pos, undefined, { ...ref.node.attrs, ...attrs })
       }
@@ -114,11 +130,25 @@ function applyContentOp(tr: Transform, op: OutlineOp, i: number): void {
     }
 
     case 'deleteBlocks': {
+      // 重复 id：第二次删除会落在位移后的错误内容上，拒绝
+      if (new Set(op.blockIds).size !== op.blockIds.length) {
+        throw AppError.validation(`${w}: blockIds 存在重复`)
+      }
       const refs = op.blockIds.map(id => requireBlock(doc, id, w))
+      // 祖先+后代同一批删除：目标互相嵌套，范围语义歧义，拒绝
+      for (const outer of refs) {
+        for (const inner of refs) {
+          if (outer === inner) continue
+          if (outer.pos < inner.pos && inner.pos + inner.node.nodeSize <= outer.pos + outer.node.nodeSize) {
+            throw AppError.validation(`${w}: 不能同时删除区块及其子区块（${outer.blockId} 包含 ${inner.blockId}）`)
+          }
+        }
+      }
       // 自后向前删除，避免位置位移影响后续删除
       const sorted = [...refs].sort((a, b) => b.pos - a.pos)
       for (const ref of sorted) {
         tr.delete(ref.pos, ref.pos + ref.node.nodeSize)
+        collectSubtreeIds(ref.node, modifiedIds)
       }
       if (!tr.doc.childCount) {
         throw AppError.validation(`${w}: 不能删除全部区块，大纲至少保留一个区块`)

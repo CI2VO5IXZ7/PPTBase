@@ -183,7 +183,7 @@ export function createDocService({ db, config, outlineBytes }: DocServiceDeps) {
            (SELECT COUNT(*) FROM outline_submissions s WHERE s.doc_id = d.id AND s.status = 'pending') AS outline_pending
          FROM documents d
          LEFT JOIN outlines o ON o.doc_id = d.id
-         LEFT JOIN outline_approvals a ON a.id = o.active_approval_id
+         LEFT JOIN outline_approvals a ON a.id = o.active_approval_id AND a.status = 'active'
          WHERE d.owner_id = ? ORDER BY d.updated_at DESC`
       ).all(ownerId) as {
         id: string, title: string, version: number, data: string, updated_at: number,
@@ -201,6 +201,7 @@ export function createDocService({ db, config, outlineBytes }: DocServiceDeps) {
             version: row.outline_version,
             contentVersion: row.outline_content_version,
             pendingSubmissions: row.outline_pending,
+            approvalActive: row.approval_content_version !== null,
             approvalValid: row.approval_content_version !== null && row.approval_content_version === row.outline_content_version,
           },
         } : {}),

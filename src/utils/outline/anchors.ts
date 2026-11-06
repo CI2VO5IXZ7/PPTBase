@@ -143,7 +143,8 @@ export function mapThreads(threads: OutlineThread[], mapping: Mapping, newDoc: P
     if (anchor.kind === 'block' || anchor.kind === 'image') {
       if (thread.detached) continue
       const ref = anchor.blockId ? index.get(anchor.blockId) : undefined
-      if (!ref) {
+      // 图片锚点还要求目标仍是 image 节点：同 blockId 被替换成其他节点视为失效
+      if (!ref || (anchor.kind === 'image' && ref.node.type.name !== 'image')) {
         thread.detached = true
         changed = true
       }

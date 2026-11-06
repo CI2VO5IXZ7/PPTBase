@@ -12,7 +12,7 @@ import { Transform } from 'prosemirror-transform'
 import { outlineSchema } from '../../src/utils/outline/schema'
 import {
   auth, createDoc, createOutline, createUser, editTokenOf, heading, imageBlock,
-  makeApp, para, PNG_DATA_URL, textElement, tokenHeader, viewTokenOf,
+  makeApp, outlineDocJson, para, PNG_DATA_URL, textElement, tokenHeader, viewTokenOf,
   type TestContext,
 } from './helpers'
 import { MIGRATIONS, openDb } from '../src/db'
@@ -645,5 +645,191 @@ describe('预算、级联与隔离', () => {
     const outlineAfter = (await getOutline(auth(alice.key), doc.docId)).json()
     expect(outlineAfter.version).toBe(outlineBefore.version)
     expect(outlineAfter.contentVersion).toBe(outlineBefore.contentVersion)
+  })
+})
+
+describe('边界修复', () => {
+  it('deleteBlocks 拒绝重复 id 与祖先+后代同批删除', async () => {
+    const { doc } = await docWithOutline()
+    const token = editTokenOf(ctx, doc.docId)
+    // 结构：bullet_list(l1) > list_item(li1) > paragraph(ip1)
+    const build = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: {
+        baseVersion: 1,
+        ops: [{
+          op: 'insertBlocks',
+          blocks: [
+            para('p1', 'top'),
+            {
+              type: 'bullet_list',
+              attrs: { blockId: 'l1' },
+              content: [{ type: 'list_item', attrs: { blockId: 'li1' }, content: [para('ip1', 'nested')] }],
+            },
+          ],
+        }],
+      },
+    })
+    expect(build.statusCode).toBe(200)
+    const v = build.json().version
+
+    // 重复 id → 400，且整体不写
+    let res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: v, ops: [{ op: 'deleteBlocks', blockIds: ['p1', 'p1'] }] },
+    })
+    expect(res.statusCode).toBe(400)
+    expect((await getOutline(auth(alice.key), doc.docId)).json().version).toBe(v)
+
+    // 祖先(bullet_list)+后代(list_item) → 400，且整体不写
+    res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: v, ops: [{ op: 'deleteBlocks', blockIds: ['l1', 'li1'] }] },
+    })
+    expect(res.statusCode).toBe(400)
+    const state = (await getOutline(auth(alice.key), doc.docId)).json()
+    expect(state.version).toBe(v)
+    expect(state.content.content.length).toBe(3) // 默认段 + p1 + l1 均保留
+  })
+
+  it('同批次先改写区块再对其加批注被拒绝；未修改区块不受影响', async () => {
+    const { doc } = await docWithOutline()
+    const token = editTokenOf(ctx, doc.docId)
+    const build = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: { baseVersion: 1, ops: [{ op: 'insertBlocks', blocks: [para('p1', '旧文本'), para('p2', '另一块')] }] },
+    })
+    const v = build.json().version
+
+    // replaceBlock p1 + addComment textRange on p1 → 400 歧义
+    let res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: {
+        baseVersion: v,
+        ops: [
+          { op: 'replaceBlock', blockId: 'p1', block: para('p1', '新文本') },
+          { op: 'addComment', anchor: { kind: 'textRange', fragments: [{ blockId: 'p1', from: 0, to: 2 }] }, content: '歧义批注' },
+        ],
+      },
+    })
+    expect(res.statusCode).toBe(400)
+    expect((await getOutline(auth(alice.key), doc.docId)).json().version).toBe(v)
+
+    // replaceBlock p1 + addComment on p2（未修改）→ 200
+    res = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/ops`,
+      headers: tokenHeader(token),
+      payload: {
+        baseVersion: v,
+        ops: [
+          { op: 'replaceBlock', blockId: 'p1', block: para('p1', '新文本') },
+          { op: 'addComment', anchor: { kind: 'block', blockId: 'p2' }, content: '可以' },
+        ],
+      },
+    })
+    expect(res.statusCode).toBe(200)
+    expect(res.json().version).toBe(v + 1)
+    const state = (await getOutline(auth(alice.key), doc.docId)).json()
+    expect((state.threads as unknown[]).length).toBe(1)
+  })
+
+  it('init 相同 requestId 相同内容幂等；不同内容冲突', async () => {
+    const doc = await createDoc(ctx, alice.key, { title: 'init-idem' })
+    const first = await createOutline(ctx, alice.key, doc.docId, {
+      requestId: 'init-1',
+      content: outlineDocJson(para('a', 'A')),
+    })
+    expect(first.statusCode).toBe(200)
+    expect(first.json().existing).toBe(false)
+
+    // 相同 requestId + 相同内容 → existing:true
+    const same = await createOutline(ctx, alice.key, doc.docId, {
+      requestId: 'init-1',
+      content: outlineDocJson(para('a', 'A')),
+    })
+    expect(same.statusCode).toBe(200)
+    expect(same.json().existing).toBe(true)
+
+    // 相同 requestId + 不同内容 → 409
+    const diff = await createOutline(ctx, alice.key, doc.docId, {
+      requestId: 'init-1',
+      content: outlineDocJson(para('b', 'B')),
+    })
+    expect(diff.statusCode).toBe(409)
+
+    // 无 requestId 的重试 → existing:true（不覆盖）
+    const plain = await createOutline(ctx, alice.key, doc.docId, {})
+    expect(plain.json().existing).toBe(true)
+    // 仍只有一个 revision v1，没有不受控的重复 INSERT
+    const revs = ctx.db.prepare('SELECT COUNT(*) AS n FROM outline_revisions WHERE doc_id = ?').get(doc.docId) as { n: number }
+    expect(revs.n).toBe(1)
+  })
+
+  it('提交/确认按双份快照计配额', async () => {
+    const { gzipSync } = await import('node:zlib')
+    const { assetManifest } = await import('../../src/utils/outline/serialize')
+    const { outlineSchema: schema } = await import('../../src/utils/outline/schema')
+
+    const { doc } = await docWithOutline()
+    const row = ctx.db.prepare('SELECT content, size FROM outlines WHERE doc_id = ?').get(doc.docId) as { content: string, size: number }
+    const docRow = ctx.db.prepare('SELECT size FROM documents WHERE id = ?').get(doc.docId) as { size: number }
+    const revBytes = (ctx.db.prepare('SELECT COALESCE(SUM(LENGTH(snapshot)),0) AS n FROM outline_revisions WHERE doc_id = ?').get(doc.docId) as { n: number }).n
+
+    // 与 service.makeSnapshot 相同方式计算提交快照字节数
+    const parsed = schema.nodeFromJSON(JSON.parse(row.content))
+    const snapLen = gzipSync(JSON.stringify({
+      content: JSON.parse(row.content), threads: [], assets: assetManifest(parsed),
+    })).length
+
+    // 预算恰好只够「单份」快照：双份计费必须 413
+    const quota = docRow.size + row.size + revBytes + snapLen + 8
+    ctx.db.prepare('UPDATE users SET quota_doc_bytes = ? WHERE id = ?').run(quota, alice.userId)
+
+    const token = editTokenOf(ctx, doc.docId)
+    const fb = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/feedback`,
+      headers: tokenHeader(token), payload: {},
+    })
+    expect(fb.statusCode).toBe(413)
+
+    const ap = await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token), payload: { baseVersion: 1 },
+    })
+    expect(ap.statusCode).toBe(413)
+
+    // 半提交检查：没有遗留记录
+    expect((ctx.db.prepare('SELECT COUNT(*) AS n FROM outline_submissions WHERE doc_id = ?').get(doc.docId) as { n: number }).n).toBe(0)
+    expect((ctx.db.prepare('SELECT COUNT(*) AS n FROM outline_approvals WHERE doc_id = ?').get(doc.docId) as { n: number }).n).toBe(0)
+    ctx.db.prepare('UPDATE users SET quota_doc_bytes = NULL WHERE id = ?').run(alice.userId)
+  })
+
+  it('listDocs 只认 active 确认，撤销后 approvalActive=false', async () => {
+    const { doc } = await docWithOutline()
+    const token = editTokenOf(ctx, doc.docId)
+    const v = (await getOutline(auth(alice.key), doc.docId)).json().version
+    await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token), payload: { baseVersion: v },
+    })
+
+    const list = await ctx.app.inject({ method: 'GET', url: '/api/docs', headers: auth(alice.key) })
+    let item = list.json().find((d: { id: string }) => d.id === doc.docId)
+    expect(item.outline.approvalActive).toBe(true)
+    expect(item.outline.approvalValid).toBe(true)
+
+    await ctx.app.inject({
+      method: 'DELETE', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token),
+    })
+    const list2 = await ctx.app.inject({ method: 'GET', url: '/api/docs', headers: auth(alice.key) })
+    item = list2.json().find((d: { id: string }) => d.id === doc.docId)
+    expect(item.outline.approvalActive).toBe(false)
+    expect(item.outline.approvalValid).toBe(false)
   })
 })
