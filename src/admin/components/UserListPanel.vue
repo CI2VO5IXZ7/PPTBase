@@ -90,7 +90,7 @@
 </template>
 
 <script lang="ts" setup>
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { NEmpty, NPagination, NSelect, NSpin } from 'naive-ui'
 
 import { useAdminStore } from '../store'
@@ -101,13 +101,18 @@ import { IconSearch } from '../icons'
 const store = useAdminStore()
 const users = computed(() => store.users)
 
-const query = ref(store.query)
+// 直接绑定 store.query：创建用户等动作重置筛选时，输入框同步清空（不留旧闭包残值）
+const query = computed({
+  get: () => store.query,
+  set: (v: string) => {
+    store.query = v 
+  },
+})
 let debounce = 0
 function onQueryInput() {
   window.clearTimeout(debounce)
   debounce = window.setTimeout(() => {
-    store.query = query.value.trim()
-    store.loadUsers()
+    store.setFilters({ query: query.value }) 
   }, 250)
 }
 
@@ -117,8 +122,7 @@ const statusOptions = [
   { label: '已停用', value: 'disabled' },
 ]
 function onStatusChange(value: string) {
-  store.statusFilter = value as 'all' | 'active' | 'disabled'
-  store.loadUsers()
+  store.setFilters({ statusFilter: value as 'all' | 'active' | 'disabled' })
 }
 
 function rowNote(user: AdminUser): string {

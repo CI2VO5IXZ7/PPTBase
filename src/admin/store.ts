@@ -21,6 +21,9 @@ interface AdminState {
   keysLoading: boolean
 }
 
+// loadUsers 并发序号：筛选/翻页快速连发时，丢弃过期响应，防止旧闭包覆盖新选择
+let usersReqSeq = 0
+
 export const useAdminStore = defineStore('admin', {
   state: (): AdminState => ({
     ready: false,
@@ -96,7 +99,19 @@ export const useAdminStore = defineStore('admin', {
       this.overview = await api<Overview>('/overview')
     },
 
+    // 筛选/搜索/页控统一入口：query/statusFilter 变更重置页码与详情选择，再统一拉取
+    async setFilters(patch: { query?: string, statusFilter?: 'all' | 'active' | 'disabled' }) {
+      if (patch.query !== undefined) this.query = patch.query.trim()
+      if (patch.statusFilter !== undefined) this.statusFilter = patch.statusFilter
+      this.page = 1
+      this.selectedUserId = null
+      this.detailUser = null
+      this.keys = []
+      await this.loadUsers()
+    },
+
     async loadUsers() {
+      const seq = ++usersReqSeq
       this.usersLoading = true
       try {
         const res = await api<{ users: AdminUser[], total: number, page: number, pageSize: number }>('/users', {
@@ -107,14 +122,12 @@ export const useAdminStore = defineStore('admin', {
             pageSize: String(this.pageSize),
           },
         })
+        if (seq !== usersReqSeq) return // 过期响应：不覆盖更新的状态
         this.users = res.users
         this.usersTotal = res.total
-        // 已选用户如在新数据中出现则同步详情对象（未出现的跨页选中保留）
+        // 已选用户如在新数据中出现则同步详情对象；跨页选中保留详情，不清空
         const fresh = res.users.find(u => u.id === this.detailUser?.id)
         if (fresh) this.detailUser = fresh
-        if (this.selectedUserId && !res.users.some(u => u.id === this.selectedUserId)) {
-          this.selectedUserId = null
-        }
         if (!this.detailUser && res.users.length) {
           await this.selectUser(res.users[0].id)
         }
@@ -123,7 +136,8 @@ export const useAdminStore = defineStore('admin', {
         }
       }
       finally {
-        this.usersLoading = false
+        // 失败时保留上次真实数据（users/usersTotal 不动），不制造半状态
+        if (seq === usersReqSeq) this.usersLoading = false
       }
     },
 
@@ -133,21 +147,23 @@ export const useAdminStore = defineStore('admin', {
     },
 
     async selectUser(id: string) {
-      if (this.selectedUserId === id) return
+      if (this.detailUser?.id === id) return
       this.selectedUserId = id
       this.detailUser = this.users.find(u => u.id === id) ?? this.detailUser
       await this.loadKeys()
     },
 
     async loadKeys() {
-      if (!this.selectedUserId) {
+      const userId = this.detailUser?.id
+      if (!userId) {
         this.keys = []
         return
       }
       this.keysLoading = true
       try {
-        const res = await api<{ keys: AdminKey[] }>(`/users/${this.selectedUserId}/keys`)
-        this.keys = res.keys
+        const res = await api<{ keys: AdminKey[] }>(`/users/${userId}/keys`)
+        // 期间详情被切换则丢弃本次结果
+        if (this.detailUser?.id === userId) this.keys = res.keys
       }
       finally {
         this.keysLoading = false
@@ -174,8 +190,11 @@ export const useAdminStore = defineStore('admin', {
     },
 
     async createKey(label: string | null, requestId: string) {
+      // 快照 detailUser.id：创建/刷新期间翻页或换选不影响本次 Key 落属用户
+      const userId = this.detailUser?.id
+      if (!userId) throw new Error('未选择用户')
       const res = await api<{ id: string, key?: string, prefix: string, duplicated: boolean }>(
-        `/users/${this.detailUser!.id}/keys`,
+        `/users/${userId}/keys`,
         { method: 'POST', body: { label, requestId } },
       )
       // 明文 Key 一旦返回就必须能展示：列表/概览刷新失败只降级为告警，不吞掉创建成功
@@ -198,7 +217,13 @@ export const useAdminStore = defineStore('admin', {
         method: 'POST',
         body: { status },
       })
-      await Promise.all([this.loadUsers(), this.loadOverview()])
+      // 详情面板立即反映新状态（停用后立即显示「恢复」而非残留操作按钮）
+      if (this.detailUser?.id === userId) {
+        this.detailUser = { ...this.detailUser, status: res.status as 'active' | 'disabled' }
+        await this.loadKeys()
+      }
+      // 筛选列表刷新失败不清详情——detailUser 是本次操作的真实快照
+      await Promise.allSettled([this.loadUsers(), this.loadOverview()])
       return res
     },
 

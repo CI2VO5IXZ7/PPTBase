@@ -110,8 +110,14 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
         || path.startsWith('/assets/') || path.startsWith('/exports/')
       if (req.method === 'GET' && !reserved) {
         // 管理台独立入口页（vite 多页构建产物 admin.html）；产物缺失时回退主页面
-        if (hasAdminPage && (path === '/admin' || path === '/admin/')) {
-          return reply.sendFile('admin.html')
+        if (hasAdminPage) {
+          // /admin/ 归一化到 /admin：相对资源 ./static/… 在 /admin/ 下会错指到 /admin/static/…
+          if (path === '/admin/') return reply.redirect('/admin', 302)
+          if (path === '/admin') return reply.sendFile('admin.html')
+          // /admin/* 既不是页面也不是资源：不回退 SPA，避免把错误 URL 当 bundle
+          if (path.startsWith('/admin/')) {
+            return reply.status(404).send({ error: 'not_found', message: '资源不存在' })
+          }
         }
         return reply.sendFile('index.html')
       }
