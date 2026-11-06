@@ -1,4 +1,4 @@
-# PPTist
+# PPTBase
 
 面向 AI Agent 的在线演示文稿服务：Agent 通过远程 MCP 创建和修改演示文稿，用户在网页端查看与协作编辑，服务端可导出 PPTX / PDF / 图片。
 
@@ -73,8 +73,8 @@ docker compose exec app pptist-admin user create alice   # alice 可替换；pk_
 
 ```yaml
 mcp_servers:
-  pptist:
-    url: https://pptist.example.com/mcp   # 换成你部署的公网地址
+  pptbase:
+    url: https://pptbase.example.com/mcp   # 换成你部署的公网地址
     headers:
       Authorization: Bearer pk_...        # 真实 Key 由 pptist-admin 签发，只显示一次
 ```
@@ -82,7 +82,7 @@ mcp_servers:
 ### 管理台
 
 - 首次管理员密码：用 `ADMIN_INITIAL_PASSWORD` 环境变量（≥10 字符，仅在库里还没有密码时播种），或执行 `pptist-admin passwd`。
-- 宿主不方便调整目录权限时，可把 Compose 的 data 绑定挂载改为 Docker named volume（卷名如 `pptist-data`），不要以 root 运行应用。
+- 宿主不方便调整目录权限时，可把 Compose 的 data 绑定挂载改为 Docker named volume（卷名如 `pptbase-data`），不要以 root 运行应用。
 - 入口：生产 `GET /admin`；Vite 开发模式下 `http://localhost:5173/admin.html`。
 
 ## 运维提示

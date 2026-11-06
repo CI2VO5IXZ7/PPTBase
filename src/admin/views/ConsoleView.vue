@@ -4,7 +4,7 @@
       <div class="brand">
         <div class="brand-mark" aria-hidden="true"><IconBrand /></div>
         <div class="brand-text">
-          <div class="brand-name">PPTist</div>
+          <div class="brand-name">PPTBase</div>
           <div class="brand-sub">Admin</div>
         </div>
       </div>

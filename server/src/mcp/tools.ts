@@ -66,7 +66,7 @@ function fail(err: unknown): TextResult {
 export function buildMcpServer(ctx: McpContext): McpServer {
   const { db, config, service, queue, ownerId, keyId } = ctx
   const server = new McpServer(
-    { name: 'pptist', version: '0.1.0' },
+    { name: 'pptbase', version: '0.1.0' },
     { instructions: MCP_INSTRUCTIONS },
   )
 
@@ -104,7 +104,7 @@ export function buildMcpServer(ctx: McpContext): McpServer {
   const docIdField = z.string().min(1).describe('文档 id，由 create_presentation / list_presentations 返回')
 
   server.registerTool('get_authoring_guide', {
-    description: '获取 PPTist 页面数据编写规范（AI_PPT_SCHEMA.md）。创建或修改页面前先调用：不传 section 返回章节目录，传了返回该章节完整 Markdown，如 general（坐标系/几何/样式）、slide、text、image、shape、line、table、chart、richtext（富文本白名单）、fonts（可用字体）、example（综合示例）。',
+    description: '获取 PPTBase 页面数据编写规范（AI_PPT_SCHEMA.md）。创建或修改页面前先调用：不传 section 返回章节目录，传了返回该章节完整 Markdown，如 general（坐标系/几何/样式）、slide、text、image、shape、line、table、chart、richtext（富文本白名单）、fonts（可用字体）、example（综合示例）。',
     inputSchema: { section: z.string().optional().describe('章节 key，见目录；不传返回目录') },
   }, call(({ section }: { section?: string }) => getAuthoringGuide(section)))
 

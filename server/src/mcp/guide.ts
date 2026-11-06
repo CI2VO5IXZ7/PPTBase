@@ -84,7 +84,7 @@ export function getAuthoringGuide(section?: string): string {
   const all = sections()
   if (!section) {
     const list = [...all.values()].map(item => `- ${item.key}: ${item.title}`).join('\n')
-    return `# PPTist 页面数据编写规范（AI_PPT_SCHEMA.md）\n\n用 get_authoring_guide(section) 取对应章节完整内容：\n\n${list}`
+    return `# PPTBase 页面数据编写规范（AI_PPT_SCHEMA.md）\n\n用 get_authoring_guide(section) 取对应章节完整内容：\n\n${list}`
   }
   const found = all.get(section)
   if (!found) {
