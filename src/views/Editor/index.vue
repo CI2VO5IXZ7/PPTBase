@@ -14,6 +14,7 @@
       </div>
       <Toolbar class="layout-content-right" />
     </div>
+    <SourceAttribution class="layout-footer" />
   </div>
 
   <SelectPanel v-if="showSelectPanel" />
@@ -30,8 +31,6 @@
   >
     <ExportDialog />
   </Modal>
-
-  <SourceAttribution class="layout-footer" />
 </template>
 
 <script lang="ts" setup>
