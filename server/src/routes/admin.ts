@@ -250,7 +250,7 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       const where = clauses.length ? ' WHERE ' + clauses.join(' AND ') : ''
       const total = (db.prepare(`SELECT COUNT(*) AS n FROM users u${where}`).get(...params) as { n: number }).n
       const rows = db.prepare(
-        `${USER_SELECT}${where} ORDER BY u.created_at LIMIT ? OFFSET ?`
+        `${USER_SELECT}${where} ORDER BY u.created_at DESC, u.id DESC LIMIT ? OFFSET ?`
       ).all(...params, pageSize, (page - 1) * pageSize)
       return { users: (rows as Parameters<typeof userOut>[0][]).map(userOut), total, page, pageSize }
     })
@@ -346,7 +346,11 @@ export function adminRoutes({ db, config }: AdminRoutesDeps): FastifyPluginAsync
       catch (err) {
         if (reqId && (err as { code?: string }).code?.startsWith('SQLITE_CONSTRAINT')) {
           const existing = db.prepare('SELECT * FROM api_keys WHERE request_id = ?').get(reqId) as ApiKeyRow | undefined
-          if (existing) return { id: existing.id, prefix: existing.prefix, duplicated: true }
+          if (existing) {
+            // 兜底路径同样校验归属：requestId 属于其他用户时绝不能当成幂等返回
+            if (existing.user_id !== user.id) throw AppError.conflict('requestId 已被使用')
+            return { id: existing.id, prefix: existing.prefix, duplicated: true }
+          }
         }
         throw err
       }

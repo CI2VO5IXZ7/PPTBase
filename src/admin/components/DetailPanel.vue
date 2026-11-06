@@ -66,7 +66,7 @@
                 :max="1000000"
                 :precision="0"
                 :show-button="false"
-                placeholder="默认 100"
+                :placeholder="`默认 ${user?.quota.docs ?? ''}`"
                 clearable
               >
                 <template #suffix>份</template>
@@ -81,7 +81,7 @@
                 :max="10240"
                 :precision="0"
                 :show-button="false"
-                placeholder="默认 10"
+                :placeholder="`默认 ${user?.quota.docMb ?? ''}`"
                 clearable
               >
                 <template #suffix>MB</template>
@@ -96,7 +96,7 @@
                 :max="1000000"
                 :precision="0"
                 :show-button="false"
-                placeholder="默认 200"
+                :placeholder="`默认 ${user?.quota.exportsPerDay ?? ''}`"
                 clearable
               >
                 <template #suffix>次</template>
@@ -209,12 +209,14 @@ const store = useAdminStore()
 const message = useMessage()
 const user = computed(() => store.detailUser)
 
-// 配额表单：展示生效值；只有改动的字段才进 PATCH，未动字段保留 null 继承
+// 配额表单：输入框为自定义原值（null=继承，placeholder 显示生效值）；
+// 只有改动的字段才进 PATCH——填入等于默认的数字会显式 override，清空则恢复继承
 const quotaForm = reactive<QuotaValues>({ docs: null, docMb: null, exportsPerDay: null })
 const quotaBase = reactive<QuotaValues>({ docs: null, docMb: null, exportsPerDay: null })
 
 watch(user, u => {
-  const base = u ? quotaBaseline(u.quotaCustom, u.quota) : { docs: null, docMb: null, exportsPerDay: null }
+  // 表单/baseline 均为自定义原值：继承字段为 null，placeholder 显示生效默认
+  const base = u ? quotaBaseline(u.quotaCustom) : { docs: null, docMb: null, exportsPerDay: null }
   Object.assign(quotaForm, base)
   Object.assign(quotaBase, base)
 }, { immediate: true })

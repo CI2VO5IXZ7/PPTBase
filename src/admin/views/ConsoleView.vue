@@ -205,8 +205,10 @@ function confirmToggle(user: AdminUser) {
     ]
   confirmText.value = disabling ? '确认停用' : '确认恢复'
   confirmAction = async () => {
-    await store.setUserStatus(user.id, disabling ? 'disabled' : 'active')
+    const res = await store.setUserStatus(user.id, disabling ? 'disabled' : 'active')
     message.success(disabling ? `已停用 ${user.name}` : `已恢复 ${user.name}`)
+    // 服务端操作已生效；只是部分展示数据刷新失败时单独告警
+    if (res.refreshFailed) message.warning('刷新部分数据失败，请重试')
   }
   confirmOpen.value = true
 }

@@ -240,6 +240,30 @@ describe('管理台用户与 Key', () => {
     expect((list.json() as { keys: unknown[] }).keys).toHaveLength(1)
   })
 
+  it('requestId 被其他用户占用时 409，绝不跨用户幂等返回', async () => {
+    const a = await authed(ctx, 'POST', '/api/admin/users', session, { name: 'rid-owner' })
+    const b = await authed(ctx, 'POST', '/api/admin/users', session, { name: 'rid-other' })
+    const owner = (a.json() as { user: { id: string } }).user
+    const other = (b.json() as { user: { id: string } }).user
+    await authed(ctx, 'POST', `/api/admin/users/${owner.id}/keys`, session, { requestId: 'shared-rid' })
+
+    const res = await authed(ctx, 'POST', `/api/admin/users/${other.id}/keys`, session, { requestId: 'shared-rid' })
+    expect(res.statusCode).toBe(409)
+    const keys = await authed(ctx, 'GET', `/api/admin/users/${other.id}/keys`, session)
+    expect((keys.json() as { keys: unknown[] }).keys).toHaveLength(0)
+  })
+
+  it('新用户创建后出现在第一页（created_at DESC）', async () => {
+    const insert = ctx.db.prepare('INSERT INTO users (id, name, status, created_at) VALUES (?, ?, ?, ?)')
+    for (let i = 0; i < 25; i++) insert.run(`old-u-${i}`, `old-${i}`, 'active', 1)
+    const res = await authed(ctx, 'POST', '/api/admin/users', session, { name: 'fresh-newbie' })
+    const { user } = res.json() as { user: { id: string } }
+
+    const page1 = (await authed(ctx, 'GET', '/api/admin/users?pageSize=20&page=1', session)).json() as { users: { id: string }[] }
+    expect(page1.users).toHaveLength(20)
+    expect(page1.users.some(u => u.id === user.id)).toBe(true)
+  })
+
   it('完整闭环：Key 可用 → 吊销失效 → 停用用户全部失效（含文档链接）→ 启用恢复', async () => {
     const res = await authed(ctx, 'POST', '/api/admin/users', session, { name: 'cycle-user' })
     const { user } = res.json() as { user: { id: string } }

@@ -194,7 +194,7 @@ async function readNewPassword(): Promise<string> {
 async function passwd(db: Db): Promise<void> {
   const password = await readNewPassword()
   setAdminPassword(db, password)
-  console.log('管理员密码已更新，旧的登录会话不受影响（可要求重新登录验证）')
+  console.log('管理员密码已更新，所有既有管理员会话已撤销（业务 Key 不受影响）')
 }
 
 async function main(): Promise<void> {

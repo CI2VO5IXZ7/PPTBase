@@ -99,18 +99,16 @@ export const useAdminStore = defineStore('admin', {
       this.overview = await api<Overview>('/overview')
     },
 
-    // 筛选/搜索/页控统一入口：query/statusFilter 变更重置页码与详情选择，再统一拉取
+    // 筛选/搜索/页控统一入口：query/statusFilter 变更重置页码再拉取；
+    // 选择/详情/keys 仅在新列表请求成功后才重置——失败保留旧状态不产生半状态
     async setFilters(patch: { query?: string, statusFilter?: 'all' | 'active' | 'disabled' }) {
       if (patch.query !== undefined) this.query = patch.query.trim()
       if (patch.statusFilter !== undefined) this.statusFilter = patch.statusFilter
       this.page = 1
-      this.selectedUserId = null
-      this.detailUser = null
-      this.keys = []
-      await this.loadUsers()
+      await this.loadUsers({ resetDetail: true })
     },
 
-    async loadUsers() {
+    async loadUsers(opts: { resetDetail?: boolean } = {}) {
       const seq = ++usersReqSeq
       this.usersLoading = true
       try {
@@ -125,6 +123,11 @@ export const useAdminStore = defineStore('admin', {
         if (seq !== usersReqSeq) return // 过期响应：不覆盖更新的状态
         this.users = res.users
         this.usersTotal = res.total
+        if (opts.resetDetail) {
+          this.selectedUserId = null
+          this.detailUser = null
+          this.keys = []
+        }
         // 已选用户如在新数据中出现则同步详情对象；跨页选中保留详情，不清空
         const fresh = res.users.find(u => u.id === this.detailUser?.id)
         if (fresh) this.detailUser = fresh
@@ -233,11 +236,16 @@ export const useAdminStore = defineStore('admin', {
       // 详情面板立即反映新状态（停用后立即显示「恢复」而非残留操作按钮）
       if (this.detailUser?.id === userId) {
         this.detailUser = { ...this.detailUser, status: res.status as 'active' | 'disabled' }
-        await this.loadKeys()
       }
-      // 筛选列表刷新失败不清详情——detailUser 是本次操作的真实快照
-      await Promise.allSettled([this.loadUsers(), this.loadOverview()])
-      return res
+      // 状态已落库，后续刷新失败只降级为告警，不回滚、不误报失败
+      const settled = await Promise.allSettled([
+        (async () => {
+          if (this.detailUser?.id === userId) await this.loadKeys() 
+        })(),
+        this.loadUsers(),
+        this.loadOverview(),
+      ])
+      return { ...res, refreshFailed: settled.some(r => r.status === 'rejected') }
     },
 
     async saveQuota(userId: string, patch: { quotaDocs?: number | null, quotaDocMb?: number | null, quotaExportsPerDay?: number | null }) {

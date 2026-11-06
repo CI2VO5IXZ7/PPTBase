@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { setCsrfToken } from '../../src/admin/api'
+import { buildQuotaPatch, quotaBaseline } from '../../src/admin/quotaPatch'
 import { useAdminStore } from '../../src/admin/store'
 import type { AdminUser } from '../../src/admin/types'
 
@@ -202,6 +203,47 @@ describe('admin store：操作快照语义', () => {
     expect(store.selectedUserId).toBe(user.id)
   })
 
+  it('setUserStatus：keys 刷新 5xx 仍返回成功并标记 refreshFailed', async () => {
+    const store = seedStore()
+    handler = req => {
+      if (req.url.includes('/status')) return jsonRes({ ok: true, status: 'disabled' })
+      if (req.url.endsWith('/keys') && req.method === 'GET') return jsonRes({ error: 'boom' }, 500)
+      if (req.url.includes('/users?')) return jsonRes({ users: [USER('u1', 'disabled')], total: 1, page: 1, pageSize: 20 })
+      if (req.url.includes('/overview')) return jsonRes({})
+      return jsonRes({})
+    }
+    const res = await store.setUserStatus('u1', 'disabled')
+    expect(res.ok).toBe(true) // POST 已成功，刷新失败不回滚
+    expect(res.refreshFailed).toBe(true)
+    expect(store.detailUser?.status).toBe('disabled')
+  })
+
+  it('setFilters 拉取失败保留旧列表/详情/keys', async () => {
+    const store = useAdminStore()
+    let fail = false
+    handler = req => {
+      if (req.url.includes('/users?')) {
+        if (fail) return jsonRes({ error: 'boom' }, 500)
+        return jsonRes({ users: [USER('a')], total: 1, page: 1, pageSize: 20 })
+      }
+      if (req.url.endsWith('/keys') && req.method === 'GET') {
+        return jsonRes({ keys: [{ id: 'k1', label: 'Keep-Me', prefix: 'pk_x', revokedAt: null, createdAt: 1, lastUsedAt: null }] })
+      }
+      return jsonRes({})
+    }
+    await store.loadUsers()
+    expect(store.detailUser?.id).toBe('a')
+    expect(store.keys[0]?.label).toBe('Keep-Me')
+
+    fail = true
+    await expect(store.setFilters({ statusFilter: 'disabled' })).rejects.toThrow()
+    // 失败不得清空旧列表/选择/详情/keys
+    expect(store.users[0]?.id).toBe('a')
+    expect(store.detailUser?.id).toBe('a')
+    expect(store.keys[0]?.label).toBe('Keep-Me')
+    expect(store.statusFilter).toBe('disabled') // 筛选意图保留，用户可重试
+  })
+
   it('setUserStatus 立即更新 detailUser 状态（停用后详情可恢复）', async () => {
     const store = seedStore()
     handler = req => {
@@ -213,5 +255,28 @@ describe('admin store：操作快照语义', () => {
     await store.setUserStatus('u1', 'disabled')
     expect(store.detailUser?.status).toBe('disabled')
     expect(store.detailUser?.id).toBe('u1') // 详情保留，可执行恢复
+  })
+})
+
+// 配额补丁：baseline 保留 custom 原值（null=继承），不回填 effective
+describe('quotaPatch：null 继承语义', () => {
+  it('quotaBaseline 保留 custom 原值（含 null），不用 effective 回填', () => {
+    const base = quotaBaseline({ docs: null, docMb: 25, exportsPerDay: null })
+    expect(base).toEqual({ docs: null, docMb: 25, exportsPerDay: null })
+  })
+
+  it('未改动继承字段不产生 patch；显式填默认数字→显式值；清空→null 恢复继承', () => {
+    const custom = { docs: null, docMb: 25, exportsPerDay: null }
+    const base = quotaBaseline(custom)
+    // 表单=custom 原值：全部未动 → 空 patch（继承不误写 override）
+    expect(buildQuotaPatch({ docs: null, docMb: 25, exportsPerDay: null }, base)).toEqual({})
+    // 继承字段输入等于全局默认 100 → 显式 override 为 100（不再是 null）
+    expect(buildQuotaPatch({ docs: 100, docMb: 25, exportsPerDay: null }, base)).toEqual({ quotaDocs: 100 })
+    // 自定义字段清空 → 显式 null 恢复继承
+    expect(buildQuotaPatch({ docs: null, docMb: null, exportsPerDay: null }, base)).toEqual({ quotaDocMb: null })
+    // 三项全清 → 全部显式 null（恢复默认操作）
+    expect(buildQuotaPatch({ docs: null, docMb: null, exportsPerDay: null }, { docs: 5, docMb: 25, exportsPerDay: 50 })).toEqual({
+      quotaDocs: null, quotaDocMb: null, quotaExportsPerDay: null,
+    })
   })
 })
