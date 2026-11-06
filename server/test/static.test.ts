@@ -13,7 +13,9 @@ beforeAll(async () => {
   const staticDir = mkdtempSync(join(tmpdir(), 'pptist-static-'))
   mkdirSync(join(staticDir, 'static'))
   writeFileSync(join(staticDir, 'index.html'), '<!doctype html><html><body>pptist-index</body></html>')
+  writeFileSync(join(staticDir, 'admin.html'), '<!doctype html><html><body>pptist-admin <script src="./static/admin-x.js"></script></body></html>')
   writeFileSync(join(staticDir, 'static', 'index-abc123.js'), 'console.log("bundle")')
+  writeFileSync(join(staticDir, 'static', 'admin-x.js'), 'console.log("admin-bundle")')
   ctx = await makeApp({ STATIC_DIR: staticDir })
 })
 
@@ -81,6 +83,32 @@ describe('静态前端托管', () => {
     const res = await ctx.app.inject({ method: 'POST', url: '/some/deep/route' })
     expect(res.statusCode).toBe(404)
     expect(res.json()).toMatchObject({ error: 'not_found' })
+  })
+
+  it('GET /admin 返回 admin.html（相对 ./static 资源可解析）', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '/admin' })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('pptist-admin')
+    // admin.html 内相对引用解析为 /static/... 而非 /admin/static/...
+    const asset = await ctx.app.inject({ method: 'GET', url: '/static/admin-x.js' })
+    expect(asset.statusCode).toBe(200)
+    expect(asset.body).toBe('console.log("admin-bundle")')
+  })
+
+  it('GET /admin/ 302 归一化到 /admin，浏览器最终拿到页面与资源', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '/admin/' })
+    expect(res.statusCode).toBe(302)
+    expect(res.headers.location).toBe('/admin')
+    const final = await ctx.app.inject({ method: 'GET', url: res.headers.location as string })
+    expect(final.statusCode).toBe(200)
+    expect(final.body).toContain('pptist-admin')
+  })
+
+  it('GET /admin/* 非页面不回退 SPA：/admin/static/x → 404 JSON', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '/admin/static/fake.js' })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toMatchObject({ error: 'not_found' })
+    expect(res.headers['content-type']).toContain('application/json')
   })
 })
 

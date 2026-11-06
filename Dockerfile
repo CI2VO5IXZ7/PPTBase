@@ -13,7 +13,7 @@ COPY server/package.json server/package-lock.json ./server/
 RUN cd server && npm ci
 
 # 源码与构建配置
-COPY index.html vite.config.ts env.d.ts components.d.ts ./
+COPY index.html admin.html vite.config.ts env.d.ts components.d.ts ./
 COPY tsconfig.json tsconfig.app.json tsconfig.node.json ./
 COPY src ./src
 COPY public ./public
