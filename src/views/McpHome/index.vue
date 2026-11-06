@@ -23,6 +23,15 @@
     headers:
       Authorization: Bearer pk_...</pre>
 
+      <h2>大纲协作（新）</h2>
+      <p>
+        Agent 生成页面前，先与用户共建一份自由文档大纲：用户网页批注、提交反馈、确认后 Agent 才动页面。
+        提交/确认不会自动唤醒 Agent——用户在对话中继续找你才处理；确认固定内容版本，正文或图片变化后旧制作来源失效。
+      </p>
+      <p>
+        链接示例：编辑 <code>?doc=DOC_ID&amp;tab=outline#t=编辑令牌</code>；只读 <code>?doc=DOC_ID&amp;tab=outline&amp;mode=view#t=只读令牌</code>（令牌只经 URL hash 传递）。
+      </p>
+
       <h2>推荐工作流</h2>
       <ol>
         <li><code>get_authoring_guide</code> 获取页面数据编写规范（含 outline 章节）</li>

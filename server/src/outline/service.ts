@@ -209,7 +209,7 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
          WHERE doc_id = ? AND version = ?`
       ).run(input.contentJson, input.threadsJson, version, contentVersion, size, now, input.docId, row.version)
       if (!res.changes) {
-        throw AppError.conflict('大纲版本已被其他写入更新，请重试', { currentVersion: row.version })
+        throw AppError.conflict('大纲版本已被其他写入更新，请重试', { currentVersion: row.version, currentContentVersion: row.content_version })
       }
       db.prepare(
         `INSERT INTO outline_revisions (doc_id, version, content_version, author, key_id, summary, snapshot, request_id, request_hash, created_at)

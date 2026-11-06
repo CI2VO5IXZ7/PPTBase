@@ -24,7 +24,11 @@
 - **凭证体系**：用户 API Key（`pk_…`，供 Agent 与 REST API 使用）+ 每文档的编辑/只读令牌（`X-Doc-Token` 请求头、URL `#t=` hash，供网页端使用）。Key 只在创建时显示一次，管理端永远只显示 Key 前缀。
 - **配额与存储**：按用户配额（文档数、单文档大小、每日导出次数）。文档、修订、上传资产与导出文件全部放在 `DATA_DIR`——SQLite `app.db`（WAL）、`assets/`、`exports/`。
 - **协作**：文档带版本号，写入基于 `baseVersion` 三方合并（冲突返回 409），SSE 推送（`GET /api/docs/:id/events`），批注/评论。
-- **制作前大纲（outline）**：每个文档可有一份受限 ProseMirror 大纲（`?doc=…&tab=outline` 页签，编辑/只读令牌与 PPT 共用 `#t=`）。Agent 用 `create_outline`/`edit_outline` 起草，用户在网页批注、逐轮提交反馈（不可变快照），确认后 `begin_presentation_from_outline` 发制作来源；之后所有写页面工具必须携带 `sourceApprovalId`。大纲正文/图片变化会使旧来源失效，批注不影响。大纲图片走 `/assets/` 不可猜测地址，仅被大纲引用的本人资产可读。
+- **制作前大纲（outline）**：每个文档可有一份受限 ProseMirror 大纲（编辑 `?doc=…&tab=outline`，只读 `?doc=…&tab=outline&mode=view`，编辑/只读令牌与 PPT 共用 `#t=` hash，仅内存携带不落存储）。Agent 用 `create_outline`/`edit_outline` 起草，用户在网页批注、逐轮提交反馈（不可变快照），确认后 `begin_presentation_from_outline` 发制作来源；之后所有 Agent 写页面工具（MCP 及 REST ops/patch）必须携带 `sourceApprovalId`。大纲正文/图片/用途变化会使旧来源失效，批注不影响。用户提交反馈/确认**不会唤醒** Agent——在对话中继续处理即可。
+  - REST：`GET/POST/PATCH /api/docs/:id/outline`、`POST /api/docs/:id/outline/ops`（区块+线程）、`POST/GET /api/docs/:id/outline/feedback`、`POST /api/docs/:id/outline/feedback/:id/complete`、`POST/DELETE /api/docs/:id/outline/approval`、`POST /api/docs/:id/outline/generation`。
+  - 常见错误：`conflict`（`issues.currentVersion`/`currentContentVersion`；仅 contentVersion 未变时可安全重放，正文已变需保留草稿人工迁移）、`production_source_required`（先确认+begin）、`validation`（ops/锚点非法）、`doc_too_large`（PPT+大纲+快照合计配额）。
+  - 隐私：大纲图片走 `/assets/{id}.{ext}` **公开但不可猜测**地址（无鉴权；随机 id 即链接保密性，与 PPT 图片一致）；MCP `get_outline_asset` 另行校验资产归属与所读版本引用。资产按所有者保留，**不随文档删除**。
+  - 升级/恢复：v3→v4 自动迁移建 `outlines`/`outline_revisions`/`outline_submissions`/`outline_approvals`；升级前备份 `app.db`（WAL）+ `assets/` 全目录；回滚需恢复旧备份（v4 新表对旧程序无害但不回读）。配额按 PPT 正文+大纲正文+快照合计计入 `quota_doc_bytes`。
 - **远程 MCP**：`POST /mcp`（Streamable HTTP，无状态，唯一端点）提供创建、编辑、导出演示文稿的工具——`create_presentation`、`add_slides`、`update_elements`、`batch_edit`、`get_changes`、`export_presentation` 等；大纲工具 `create_outline`、`get_outline`、`edit_outline`、`get_outline_feedback`、`complete_outline_feedback`、`begin_presentation_from_outline`、`get_outline_asset`；`get_authoring_guide` 分段返回编写规范（`doc/AI_PPT_SCHEMA.md`，含 outline 章节）。
 - **服务端导出**：无头 Chromium（Playwright）复用前端导出运行时渲染 PPTX / PDF / PNG；JSON 导出不走浏览器。
 - **管理端**：独立的 `/admin` 管理台（单独的 Vite 入口 `admin.html`，Vue 3 + Naive UI）+ `pptist-admin` CLI，覆盖用户、Key、配额与 SQLite 在线备份。

@@ -98,7 +98,7 @@ const onThreadOp = async (op: Record<string, unknown>) => {
   if (outline.readonly) return
   // 线程操作先 drain 自动保存，避免 baseVersion 落后导致 409
   if (!(await sync.drain())) {
-    outline.lastError = '请先解决未保存/冲突内容'; return 
+    outline.lastError = '请先解决未保存/冲突内容'; return
   }
   busy.value = true
   try {
@@ -125,14 +125,14 @@ const guard = async () => {
   editorRef.value?.flushNow()
   await Promise.resolve() // 让 flushNow 同步 emit 的 steps 先进入队列
   if (outline.uploadsPending) {
-    outline.lastError = '有图片上传未完成'; return false 
+    outline.lastError = '有图片上传未完成'; return false
   }
   return sync.drain()
 }
 
 const onSubmitFeedback = async () => {
   if (!(await guard())) {
-    outline.lastError = '内容未保存完成，暂不能提交'; return 
+    outline.lastError = '内容未保存完成，暂不能提交'; return
   }
   busy.value = true
   try {
@@ -149,7 +149,7 @@ const onSubmitFeedback = async () => {
 
 const onApprove = async () => {
   if (!(await guard())) {
-    outline.lastError = '内容未保存完成，暂不能确认'; return 
+    outline.lastError = '内容未保存完成，暂不能确认'; return
   }
   busy.value = true
   try {
@@ -185,7 +185,7 @@ const onRevoke = async () => {
 
 // 冲突：刷新为最新版本，本地草稿保留可复制
 const onDiscardDraft = async () => {
-  await sync.resolveConflict() 
+  await sync.resolveConflict()
 }
 const copyDraft = async () => {
   const d = outline.localDraft
@@ -209,13 +209,13 @@ const onBeforeUnload = (e: BeforeUnloadEvent) => {
   editorRef.value?.flushNow()
   void sync.flush()
   if (sync.hasUnsavedChanges()) {
-    e.preventDefault(); e.returnValue = '' 
+    e.preventDefault(); e.returnValue = ''
   }
 }
 
 // 有未保存内容或 IME 中：挂起远端刷新，避免重建编辑器打断输入
 watch(() => sync.hasUnsavedChanges(), v => {
-  suspendRefresh.value = v 
+  suspendRefresh.value = v
 }, { immediate: true })
 watch(() => outline.content, c => {
   if (c && !sync.hasUnsavedChanges()) editorContent.value = c

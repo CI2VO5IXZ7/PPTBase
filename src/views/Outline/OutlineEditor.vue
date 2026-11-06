@@ -91,7 +91,7 @@ function threadDecorations(state: EditorState): DecorationSet {
   const doc = state.doc
   const byId = new Map<string, number>()
   doc.descendants((node, pos) => {
-    if (node.attrs.blockId) byId.set(node.attrs.blockId, pos); return true 
+    if (node.attrs.blockId) byId.set(node.attrs.blockId, pos); return true
   })
   for (const t of props.threads) {
     if (t.detached) continue
@@ -115,7 +115,7 @@ function threadDecorations(state: EditorState): DecorationSet {
 
 // ── 工具栏命令 ──
 const cmd = (c: Command) => () => {
-  if (view) c(view.state, view.dispatch, view); view?.focus() 
+  if (view) c(view.state, view.dispatch, view); view?.focus()
 }
 const toolbar = computed(() => [
   { label: 'H1', title: '标题1', run: cmd(setBlockType(S.nodes.heading, { level: 1 })), active: () => blockActive('heading', 1) },
@@ -257,7 +257,7 @@ function applyImageAttrs() {
   const { pos, caption, usage, usageDescription } = imageSel.value
   const node = view.state.doc.nodeAt(pos)
   if (!node || node.type.name !== 'image') {
-    imageSel.value = null; return 
+    imageSel.value = null; return
   }
   view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, caption, usage, usageDescription }))
   imageSel.value = null
@@ -292,10 +292,10 @@ onMounted(() => {
           decorations: state => threadDecorations(state),
           handleDOMEvents: {
             compositionstart: () => {
-              emit('composing', true); return false 
+              emit('composing', true); return false
             },
             compositionend: () => {
-              emit('composing', false); return false 
+              emit('composing', false); return false
             },
             click: (_v, event) => {
               const pos = view?.posAtCoords({ left: event.clientX, top: event.clientY })
@@ -356,7 +356,7 @@ onBeforeUnmount(() => {
 // 父级 drain：立即冲刷 debounce 队列（保存前/导航前调用）
 function flushNow() {
   if (flushTimer) {
-    clearTimeout(flushTimer); flushTimer = null 
+    clearTimeout(flushTimer); flushTimer = null
   }
   const batch = pendingSteps.splice(0)
   if (batch.length) emit('steps', batch)

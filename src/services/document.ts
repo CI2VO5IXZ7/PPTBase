@@ -121,7 +121,7 @@ export interface OutlineEvent {
   summary: string[]
 }
 
-export function subscribe(id: string, onUpdate: (event: DocEvent) => void, onOutline?: (event: OutlineEvent) => void): () => void {
+export function subscribe(id: string, onUpdate: (event: DocEvent) => void, onOutline?: (event: OutlineEvent) => void, onReconnect?: () => void): () => void {
   let closed = false
   let retries = 0
   let abort: AbortController | null = null
@@ -157,6 +157,8 @@ export function subscribe(id: string, onUpdate: (event: DocEvent) => void, onOut
         headers: { 'X-Doc-Token': docToken },
         signal: abort.signal,
       })
+      // 断线后首次成功重连：由调用方独立 GET 补拉（不把 SSE 当可靠事件队列）
+      if (res.ok && retries > 0) onReconnect?.()
       if (!res.ok || !res.body) throw new Error(`events ${res.status}`)
       retries = 0
 

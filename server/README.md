@@ -25,11 +25,33 @@ npm start            # node dist/index.js
 
 ## 大纲（outline）
 
-- 每张文档至多一份大纲：REST `GET/POST/PATCH /api/docs/:id/outline`、`/outline/ops`、`/outline/feedback`、`/outline/approval`、`/outline/generation`；MCP 七个工具同名映射（见 `src/mcp/outline.ts`）。
-- 表：`outlines`（当前内容+版本+线程）、`outline_revisions`（版本流水）、`outline_submissions`/`outline_approvals`（不可变 gzip 快照）。
-- 双版本 CAS：`version`（任何写入+1）与 `contentVersion`（仅正文变化+1）——批注不影响内容确认。
-- 制作门禁：文档有大纲时，Agent 写页面（ops/patch/MCP 写工具）必须携带有效 `sourceApprovalId`（`begin_presentation_from_outline` 返回）；编辑令牌（浏览器用户）与无大纲旧文档不受影响。
-- 备份/恢复：大纲随 `app.db` 一起备份（WAL 在线备份同文档）；大纲引用的图片在 `assets/` 目录，随文档删除级联。升级自动跑 v4 迁移。
+每张文档至多一份大纲；正文为受限 ProseMirror JSON（与 Slide schema 无关，也不是 `get_presentation(view="outline")` 的压缩视图）。
+
+### REST
+
+| 方法+路径 | 权限 | 说明 |
+|---|---|---|
+| `POST /api/docs/:id/outline` | owner Key | 初始化（幂等 `requestId`+`init_request_hash`；已存在返回 `existing`） |
+| `GET /api/docs/:id/outline` | edit/view/owner | 当前内容+线程+双版本+提交/确认/制作状态 |
+| `PATCH /api/docs/:id/outline` | edit/owner | 网页 PM steps：`{baseVersion, requestId, steps}`；409 返回 `issues.currentVersion`/`currentContentVersion` |
+| `POST /api/docs/:id/outline/ops` | edit/owner | 区块/线程操作（insertBlocks/replaceBlock/updateBlockAttrs/deleteBlocks/moveBlock/addComment/replyComment/setThreadStatus），`baseVersion` 必填 |
+| `POST /api/docs/:id/outline/feedback` | edit token | 用户提交一轮反馈（不可变 gzip 快照），幂等去重 |
+| `GET /api/docs/:id/outline/feedback[?id&status&cursor&limit]` | owner Key | 轮次列表/单轮快照，`hasMore`/`nextCursor` |
+| `POST /api/docs/:id/outline/feedback/:id/complete` | owner Key | 标记该轮处理完成（不影响其他轮次，不解决批注） |
+| `POST/DELETE /api/docs/:id/outline/approval` | edit token | 用户确认/撤销（快照绑定 `contentVersion`；有未解决批注需 `acknowledgeOpenThreads`） |
+| `POST /api/docs/:id/outline/generation` | owner Key | Agent 校验确认有效后发 `approvalId`+`contentVersion`+`pptVersion` |
+
+### MCP 大纲工具（同一 `/mcp`，同一 Key）
+
+`create_outline`（返回 `outlineEditUrl`/`outlineViewUrl`）、`get_outline`（完整 JSON + 带 blockId 可读分页 `hasMore/nextCursor` + 推导素材清单，可读 current/submission/approval 快照）、`edit_outline`（同 ops 语义）、`get_outline_feedback`、`complete_outline_feedback`、`begin_presentation_from_outline`、`get_outline_asset`（精确 `assetId` + 所有者 + 所读版本引用校验，返回 `image` 内容块；≤5MB）。
+
+### 存储与门禁
+
+- 表：`outlines`（当前正文+线程+双版本）、`outline_revisions`（版本流水 gzip）、`outline_submissions`/`outline_approvals`（不可变 gzip 快照，各计两份配额）。
+- `version` 任何写入 +1；`contentVersion` 仅正文/图片/用途变化 +1——批注不会使确认失效。
+- 制作门禁：有大纲时 Agent 写页面（MCP 全部写工具 + REST `ops`/`patch`/`PUT`）必须带有效 `sourceApprovalId`，在服务层统一校验；未确认/未 begin/已撤销/正文已变 → 409 `production_source_required` 及下一步提示。编辑令牌用户与无大纲旧文档不受影响。
+- 图片隐私：`/assets/{id}.{ext}` 为公开不可猜测地址（无鉴权）；`get_outline_asset` 只做所有者+引用校验，不替代 URL 保密性。资产按所有者保留，**不随文档删除**。
+- 升级/恢复：v4 迁移自动执行；备份 `app.db` + `assets/`；配额合计 PPT+大纲+快照字节。
 
 ## 环境变量
 

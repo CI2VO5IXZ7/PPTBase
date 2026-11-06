@@ -11,21 +11,26 @@ export class StepsQueue {
   private flightRequestId = ''
 
   get size(): number {
-    return this.steps.length + (this.flight?.length ?? 0) 
+    return this.steps.length + (this.flight?.length ?? 0)
   }
   get pendingCount(): number {
-    return this.steps.length 
+    return this.steps.length
   }
   get inFlight(): boolean {
-    return this.flight !== null 
+    return this.flight !== null
   }
   get inflightRequestId(): string {
-    return this.flightRequestId 
+    return this.flightRequestId
   }
 
   enqueue(batch: Record<string, unknown>[]): number {
     this.steps.push(...batch)
     return this.steps.length
+  }
+
+  // in-flight 批次内容（用于同 requestId 重试；不重置飞行状态）
+  takeFlightPayload(): Record<string, unknown>[] | null {
+    return this.flight
   }
 
   // 取一批（<=MAX_BATCH），记录 in-flight 状态；已在飞行中返回 null

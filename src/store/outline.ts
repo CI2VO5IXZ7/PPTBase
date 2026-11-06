@@ -41,7 +41,8 @@ export const useOutlineStore = defineStore('outline', {
   }),
   getters: {
     readonly(state) {
-      return state.role === 'view'
+      // 失败即关闭：未初始化 role 一律视为只读
+      return state.role !== 'owner' && state.role !== 'edit'
     },
     openThreads(state) {
       return state.threads.filter(t => t.status === 'open').length

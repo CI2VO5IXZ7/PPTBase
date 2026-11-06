@@ -12,5 +12,5 @@
     "skipLibCheck": true
   },
   "include": ["src", "test", "../src/types/slides.ts", "../src/types/outline.ts", "../src/utils/outline"],
-  "exclude": ["../src/utils/outline/viewSchema.ts"]
+  "exclude": ["../src/utils/outline/viewSchema.ts", "../src/utils/outline/pendingSteps.ts", "../src/utils/outline/syncCore.ts"]
 }
