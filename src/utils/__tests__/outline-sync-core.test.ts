@@ -6,19 +6,22 @@ import { test } from 'node:test'
 import { OutlineSyncCore, type OutlineStateSnapshot, type StepJson, type WriteResult } from '../outline/syncCore.ts'
 
 type PatchCall = { baseVersion: number, requestId: string, steps: StepJson[] }
+type Behavior = (call: PatchCall, n: number) => Promise<WriteResult>
 
-function fakeTransport(behavior: (call: PatchCall, n: number) => Promise<WriteResult>, remote?: () => OutlineStateSnapshot) {
+function fakeTransport(behavior: Behavior, remote?: () => OutlineStateSnapshot) {
   const calls: PatchCall[] = []
   let remoteState: OutlineStateSnapshot = { version: 1, contentVersion: 1, content: { type: 'doc' }, threads: [], status: null }
   return {
     calls,
     transport: {
-      getState: async () => remote ? remote() : remoteState,
-      patchSteps: async (baseVersion: number, requestId: string, steps: StepJson[]) => {
+      getState: () => Promise.resolve(remote ? remote() : remoteState),
+      patchSteps: (baseVersion: number, requestId: string, steps: StepJson[]) => {
         calls.push({ baseVersion, requestId, steps })
         return behavior({ baseVersion, requestId, steps }, calls.length)
       },
-      setRemote(s: OutlineStateSnapshot) { remoteState = s },
+      setRemote(s: OutlineStateSnapshot) {
+        remoteState = s
+      },
     },
   }
 }
@@ -29,10 +32,10 @@ const rid = () => 'fixed-rid'
 // 1. 两次 5xx 后恢复：同 requestId+payload+baseVersion 重试，成功才推进
 test('两次 5xx → 恢复：同一 requestId/payload/baseVersion，成功前不丢步', async () => {
   let n = 0
-  const { transport, calls } = fakeTransport(async () => {
+  const { transport, calls } = fakeTransport(() => {
     n++
-    if (n <= 2) throw Object.assign(new Error('boom'), { status: 500 })
-    return okWrite(2, 2)
+    if (n <= 2) return Promise.reject(Object.assign(new Error('boom'), { status: 500 }))
+    return Promise.resolve(okWrite(2, 2))
   })
   const core = new OutlineSyncCore(transport, {}, rid)
   core.version = 1; core.contentVersion = 1
@@ -54,12 +57,14 @@ test('两次 5xx → 恢复：同一 requestId/payload/baseVersion，成功前�
 // 2. 飞行期间新输入不混入已发送 payload，独立批次发送
 test('飞行期间新输入：不混入 retried payload，成功后单独发送', async () => {
   let call = 0
-  const { transport, calls } = fakeTransport(async () => {
+  const { transport, calls } = fakeTransport(() => {
     call++
-    if (call === 1) throw Object.assign(new Error('net'), {})
-    return okWrite(2 + call, 2)
+    if (call === 1) return Promise.reject(new Error('net'))
+    return Promise.resolve(okWrite(2 + call, 2))
   })
-  const core = new OutlineSyncCore(transport, {}, (() => { let i = 0; return () => `r${++i}` })())
+  const core = new OutlineSyncCore(transport, {}, (() => {
+    let i = 0; return () => `r${++i}` 
+  })())
   core.version = 1; core.contentVersion = 1
   core.enqueue([{ a: 1 }])
   await core.flush() // 网络失败 → flight 'r1'
@@ -76,10 +81,14 @@ test('飞行期间新输入：不混入 retried payload，成功后单独发送'
 // 3. 409 元数据版本变化（contentVersion 未变）→ 安全重放
 test('409 仅元数据变化：contentVersion 未变 → 更新版本自动重试', async () => {
   let n = 0
-  const { transport, calls } = fakeTransport(async () => {
+  const { transport, calls } = fakeTransport(() => {
     n++
-    if (n === 1) throw Object.assign(new Error('conflict'), { status: 409, issues: { currentVersion: 5, currentContentVersion: 1 } })
-    return okWrite(6, 1)
+    if (n === 1) {
+      return Promise.reject(Object.assign(new Error('conflict'), {
+        status: 409, issues: { currentVersion: 5, currentContentVersion: 1 },
+      }))
+    }
+    return Promise.resolve(okWrite(6, 1))
   })
   const core = new OutlineSyncCore(transport, {}, rid)
   core.version = 1; core.contentVersion = 1
@@ -95,11 +104,13 @@ test('409 仅元数据变化：contentVersion 未变 → 更新版本自动重�
 
 // 4. 409 正文变化 → 冲突 + 本地草稿保留全部 steps
 test('409 正文变化：conflict + 草稿含全部未提交 steps', async () => {
-  const { transport } = fakeTransport(async () => {
-    throw Object.assign(new Error('conflict'), { status: 409, issues: { currentVersion: 9, currentContentVersion: 7 } })
-  })
+  const { transport } = fakeTransport(() => Promise.reject(Object.assign(new Error('conflict'), {
+    status: 409, issues: { currentVersion: 9, currentContentVersion: 7 },
+  })))
   const conflicts: { remoteVersion: number }[] = []
-  const core = new OutlineSyncCore(transport, { onConflict: i => conflicts.push(i) }, rid)
+  const core = new OutlineSyncCore(transport, { onConflict: i => {
+    conflicts.push(i) 
+  } }, rid)
   core.version = 1; core.contentVersion = 1
   core.trackDoc({ type: 'doc', content: [] })
   core.enqueue([{ a: 1 }, { a: 2 }])
@@ -114,14 +125,13 @@ test('409 正文变化：conflict + 草稿含全部未提交 steps', async () =>
 
 // 5. drain 在冲突时明确返回 false；正常排空
 test('drain：冲突返回 false；正常清空队列返回 true', async () => {
-  const { transport } = fakeTransport(async () => okWrite(2, 2))
+  const { transport } = fakeTransport(() => Promise.resolve(okWrite(2, 2)))
   const core = new OutlineSyncCore(transport, {}, rid)
   core.enqueue([{ a: 1 }])
   assert.equal(await core.drain(), true)
-  core.setStatusForTest?.()
-  const c2 = new OutlineSyncCore(fakeTransport(async () => {
-    throw Object.assign(new Error('c'), { status: 409, issues: { currentVersion: 9, currentContentVersion: 9 } })
-  }).transport, {}, rid)
+  const c2 = new OutlineSyncCore(fakeTransport(() => Promise.reject(Object.assign(new Error('c'), {
+    status: 409, issues: { currentVersion: 9, currentContentVersion: 9 },
+  }))).transport, {}, rid)
   c2.enqueue([{ a: 1 }])
   assert.equal(await c2.drain(), false)
 })
@@ -130,8 +140,10 @@ test('drain：冲突返回 false；正常清空队列返回 true', async () => {
 test('断线重连 pull：独立 GET；未提交时只更新版本不覆盖正文', async () => {
   let remote = { version: 10, contentVersion: 10, content: { type: 'doc', content: [{ type: 'paragraph' }] }, threads: [], status: null }
   const applied: OutlineStateSnapshot[] = []
-  const { transport } = fakeTransport(async () => okWrite(11, 10), () => remote)
-  const core = new OutlineSyncCore(transport, { onRemoteState: s => applied.push(s) }, rid)
+  const { transport } = fakeTransport(() => Promise.resolve(okWrite(11, 10)), () => remote)
+  const core = new OutlineSyncCore(transport, { onRemoteState: s => {
+    applied.push(s) 
+  } }, rid)
   // 无未提交 → 全量应用
   assert.equal(await core.pull(true), 'applied')
   // 有未提交 → deferred，仅元数据
@@ -144,7 +156,7 @@ test('断线重连 pull：独立 GET；未提交时只更新版本不覆盖正�
 
 // 7. 队列压力 >8000：全部保留 + 显式背压告警
 test('队列 >8000 步：不丢任何步骤，返回背压告警', async () => {
-  const { transport, calls } = fakeTransport(async () => okWrite(2, 2))
+  const { transport, calls } = fakeTransport(() => Promise.resolve(okWrite(2, 2)))
   const core = new OutlineSyncCore(transport, {}, rid)
   core.version = 1; core.contentVersion = 1
   const res = core.enqueue(Array.from({ length: 8100 }, (_, i) => ({ i })))
@@ -152,17 +164,16 @@ test('队列 >8000 步：不丢任何步骤，返回背压告警', async () => {
   assert.ok(res.warning)
   assert.equal(core.queue.size, 8100)
   // 排空后全部发送（多批次）
-  let sent = 0
-  while (await core.flush()) { sent++; if (!core.queue.size) break }
+  while (core.queue.size) {
+    if (!(await core.flush())) break
+  }
   const total = calls.reduce((n, c) => n + c.steps.length, 0)
   assert.equal(total, 8100)
 })
 
 // 8. 4xx 明确失败：批次回队首 + offline
 test('4xx：回队首保留 + offline（不伪装已保存）', async () => {
-  const { transport } = fakeTransport(async () => {
-    throw Object.assign(new Error('bad'), { status: 403 })
-  })
+  const { transport } = fakeTransport(() => Promise.reject(Object.assign(new Error('bad'), { status: 403 })))
   const core = new OutlineSyncCore(transport, {}, rid)
   core.enqueue([{ a: 1 }])
   assert.equal(await core.flush(), false)
