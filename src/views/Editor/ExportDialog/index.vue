@@ -22,7 +22,6 @@ import ExportImage from './ExportImage.vue'
 import ExportJSON from './ExportJSON.vue'
 import ExportPDF from './ExportPDF.vue'
 import ExportPPTX from './ExportPPTX.vue'
-import ExportSpecificFile from './ExportSpecificFile.vue'
 import Tabs from '@/components/Tabs.vue'
 
 interface TabItem {
@@ -36,7 +35,6 @@ const { dialogForExport } = storeToRefs(mainStore)
 const setDialogForExport = mainStore.setDialogForExport
 
 const tabs: TabItem[] = [
-  { key: 'pptist', label: '导出 PPTIST 文件' },
   { key: 'pptx', label: '导出 PPTX' },
   { key: 'image', label: '导出图片' },
   { key: 'json', label: '导出 JSON' },
@@ -49,7 +47,6 @@ const currentDialogComponent = computed<unknown>(() => {
     'json': ExportJSON,
     'pdf': ExportPDF,
     'pptx': ExportPPTX,
-    'pptist': ExportSpecificFile,
   }
   if (dialogForExport.value) return dialogMap[dialogForExport.value] || null
   return null

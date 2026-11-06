@@ -12,6 +12,7 @@
         <ThumbnailSlide class="slide-thumbnail" :slide="slide" :size="slideWidth" />
       </div>
     </div>
+    <SourceAttribution class="viewer-footer" />
   </div>
 </template>
 
@@ -23,6 +24,7 @@ import useScreening from '@/hooks/useScreening'
 
 import ThumbnailSlide from '@/views/components/ThumbnailSlide/index.vue'
 import Button from '@/components/Button.vue'
+import SourceAttribution from '@/components/SourceAttribution.vue'
 
 const { title, slides } = storeToRefs(useSlidesStore())
 const { enterScreeningFromStart } = useScreening()
@@ -99,5 +101,11 @@ onUnmounted(() => observer?.disconnect())
   .slide-thumbnail {
     box-shadow: 0 2px 12px rgba(0, 0, 0, .12);
   }
+}
+.viewer-footer {
+  flex-shrink: 0;
+  height: 20px;
+  background-color: #fff;
+  border-top: 1px solid $borderColor;
 }
 </style>

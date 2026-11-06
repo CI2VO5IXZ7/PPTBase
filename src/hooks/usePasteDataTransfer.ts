@@ -1,11 +1,9 @@
 import { MIME_MAP } from '@/configs/mime'
 import { getImageDataURL } from '@/utils/image'
 import useCreateElement from './useCreateElement'
-import useImport from './useImport'
 
 export default () => {
   const { createImageElement, createVideoElement, createAudioElement } = useCreateElement()
-  const { importSpecificFile, importPPTXFile } = useImport()
 
   const pasteDataTransfer = (dataTransfer: DataTransfer) => {
     const dataItems = dataTransfer.items
@@ -38,28 +36,6 @@ export default () => {
             const audioURL = URL.createObjectURL(audioFile)
             const ext = MIME_MAP[audioFile.type] || ''
             createAudioElement(audioURL, ext)
-            isFile = true
-          }
-        }
-      }
-    }
-
-    if (!isFile && dataTransferFirstItem && dataTransferFirstItem.kind === 'file') {
-      if (!isFile && dataTransferFirstItem.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') {
-        const pptxFile = dataTransferFirstItem.getAsFile()
-        if (pptxFile) {
-          importPPTXFile([pptxFile])
-          isFile = true
-        }
-      }
-      else if (!isFile) {
-        const unknownFile = dataTransferFirstItem.getAsFile()
-
-        if (unknownFile && unknownFile.name) {
-          const ext = unknownFile.name.split('.').pop() || ''
-
-          if (ext === 'pptist') {
-            importSpecificFile([unknownFile])
             isFile = true
           }
         }

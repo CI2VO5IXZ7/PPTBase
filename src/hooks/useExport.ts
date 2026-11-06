@@ -9,7 +9,6 @@ import type { PPTElementOutline, PPTElementShadow, PPTElementLink, Slide } from 
 import { getElementRange, getLineElementPath, getTableSubThemeColor } from '@/utils/element'
 import { type AST, toAST } from '@/utils/htmlParser'
 import { type SvgPoints, toPoints } from '@/utils/svgPathParser'
-import { encrypt } from '@/utils/crypto'
 import { svg2Base64 } from '@/utils/svg2Base64'
 import message from '@/utils/message'
 
@@ -116,19 +115,6 @@ export default () => {
         message.error('导出失败')
       })
     }, 200)
-  }
-  
-  // 导出pptist文件（特有 .pptist 后缀文件）
-  const exportSpecificFile = (_slides: Slide[]) => {
-    const json = {
-      title: title.value,
-      width: viewportSize.value,
-      height: viewportSize.value * viewportRatio.value,
-      theme: theme.value,
-      slides: _slides,
-    }
-    const blob = new Blob([encrypt(JSON.stringify(json))], { type: '' })
-    saveAs(blob, `${title.value}.pptist`)
   }
   
   // 导出JSON文件
@@ -1018,7 +1004,6 @@ export default () => {
     exportImage,
     exportImagePPTX,
     exportJSON,
-    exportSpecificFile,
     exportPPTX,
     buildPPTX,
   }

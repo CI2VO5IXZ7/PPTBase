@@ -1,7 +1,4 @@
 .git
-.husky
-.github
-.vscode
 
 node_modules
 dist

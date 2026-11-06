@@ -124,24 +124,14 @@
     </ButtonGroup>
 
     <ButtonGroup class="row" passive>
-      <Popover trigger="click" v-model:value="AIPopoverVisible" style="width: 25%;" v-if="ENABLE_AI">
-        <template #content>
-          <PopoverMenuItem center @click="execAI('美化改写')">美化</PopoverMenuItem>
-          <PopoverMenuItem center @click="execAI('扩写丰富')">扩写</PopoverMenuItem>
-          <PopoverMenuItem center @click="execAI('精简提炼')">精简</PopoverMenuItem>
-        </template>
-        <CheckboxButton
-          first
-          style="width: 100%;"
-          v-tooltip="'AI辅助'"
-        ><span :class="{ 'ai-loading': isAIWriting }">{{ isAIWriting ? '' : 'AI' }}</span></CheckboxButton>
-      </Popover>
       <CheckboxButton
+        last
         style="flex: 1;"
         v-tooltip="'清除格式'"
         @click="emitRichTextCommand('clear')"
       ><i-icon-park-outline:format /></CheckboxButton>
       <CheckboxButton
+        first
         style="flex: 1;"
         :checked="!!textFormatPainter"
         v-tooltip="'格式刷（双击连续使用）'"
@@ -260,14 +250,11 @@
 <script lang="ts" setup>
 import { ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import api from '@/services'
 import { useMainStore } from '@/store'
 import emitter, { EmitterEvents } from '@/utils/emitter'
 import { FONTS } from '@/configs/font'
-import { ENABLE_AI } from '@/configs/collab'
 import useTextFormatPainter from '@/hooks/useTextFormatPainter'
 import message from '@/utils/message'
-import { htmlToText } from '@/utils/common'
 
 import TextColorButton from '@/components/TextColorButton.vue'
 import CheckboxButton from '@/components/CheckboxButton.vue'
@@ -283,7 +270,7 @@ import RadioButton from '@/components/RadioButton.vue'
 import RadioGroup from '@/components/RadioGroup.vue'
 import PopoverMenuItem from '@/components/PopoverMenuItem.vue'
 
-const { handleElement, handleElementId, richTextAttrs, textFormatPainter } = storeToRefs(useMainStore())
+const { richTextAttrs, textFormatPainter } = storeToRefs(useMainStore())
 
 const { toggleTextFormatPainter } = useTextFormatPainter()
 
@@ -307,14 +294,7 @@ const orderedListStyleTypeOption = ref(['decimal', 'lower-roman', 'upper-roman',
 
 const link = ref('')
 const linkPopoverVisible = ref(false)
-const AIPopoverVisible = ref(false)
-const isAIWriting = ref(false)
-
 watch(richTextAttrs, () => linkPopoverVisible.value = false)
-watch(handleElementId, () => {
-  if (isAIWriting.value) isAIWriting.value = false
-})
-
 const openLinkPopover = () => {
   link.value = richTextAttrs.value.link
 }
@@ -331,69 +311,13 @@ const removeLink = () => {
   linkPopoverVisible.value = false
 }
 
-const execAI = async (command: string) => {
-  AIPopoverVisible.value = false
 
-  if (!handleElement.value) return
-
-  let content = ''
-  if (handleElement.value.type === 'text' && handleElement.value.content) {
-    content = handleElement.value.content
-  }
-  if (handleElement.value.type === 'shape' && handleElement.value.text && handleElement.value.text.content) {
-    content = handleElement.value.text.content
-  }
-
-  if (!content) return message.error('没有可以执行的文本内容')
-
-  let resultText = ''
-
-  const stream = await api.AI_Writing({
-    content: htmlToText(content),
-    command,
-  })
-  if (typeof stream === 'object' && stream.state === -1) {
-    return message.error('该模型API的并发数过高，请更换其他模型重试')
-  }
-
-  isAIWriting.value = true
-
-  const reader: ReadableStreamDefaultReader = stream.body.getReader()
-  const decoder = new TextDecoder('utf-8')
-  
-  const readStream = () => {
-    reader.read().then(({ done, value }) => {
-      if (!isAIWriting.value) return
-      if (done) {
-        isAIWriting.value = false
-        return
-      }
-
-      const chunk = decoder.decode(value, { stream: true })
-      resultText += chunk
-      emitRichTextCommand('replace', resultText)
-
-      readStream()
-    })
-  }
-  readStream()
-}
 </script>
 
 <style lang="scss" scoped>
 .rich-text-base {
   user-select: none;
 
-  ::v-deep(.ai-loading) {
-    width: 16px;
-    height: 16px;
-    display: inline-block;
-    margin-top: 8px;
-    border: 1px solid $themeColor;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spinner .8s linear infinite;
-  }
 }
 .row {
   width: 100%;

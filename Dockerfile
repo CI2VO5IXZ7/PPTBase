@@ -4,9 +4,9 @@
 FROM node:22-bookworm AS build
 WORKDIR /app
 
-# 前端依赖；HUSKY=0：镜像内没有 .git，跳过 husky 的 prepare 脚本
+# 前端依赖
 COPY package.json package-lock.json ./
-RUN HUSKY=0 npm ci
+RUN npm ci
 
 # server 依赖（构建完成后 prune 成生产依赖再带走）
 COPY server/package.json server/package-lock.json ./server/

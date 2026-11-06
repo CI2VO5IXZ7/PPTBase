@@ -5,7 +5,6 @@ import { useMainStore, useSlidesStore } from '@/store'
 import type { Slide } from '@/types/slides'
 import { copyText, readClipboard } from '@/utils/clipboard'
 import { encrypt } from '@/utils/crypto'
-import { createElementIdMap, remapLineConnections } from '@/utils/element'
 import { KEYS } from '@/configs/hotkey'
 import message from '@/utils/message'
 import usePasteTextClipboardData from '@/hooks/usePasteTextClipboardData'
@@ -90,24 +89,6 @@ export default () => {
     addHistorySnapshot()
   }
 
-  // 根据模板创建新页面
-  const createSlideByTemplate = (slide: Slide) => {
-    const { groupIdMap, elIdMap } = createElementIdMap(slide.elements)
-
-    for (const element of slide.elements) {
-      remapLineConnections(element, elIdMap)
-      element.id = elIdMap[element.id]
-      if (element.groupId) element.groupId = groupIdMap[element.groupId]
-    }
-    const newSlide = {
-      ...slide,
-      id: nanoid(10),
-    }
-    mainStore.setActiveElementIdList([])
-    slidesStore.addSlide(newSlide)
-    addHistorySnapshot()
-  }
-
   // 将当前页复制一份到下一页
   const copyAndPasteSlide = () => {
     const slide = JSON.parse(JSON.stringify(currentSlide.value))
@@ -169,24 +150,16 @@ export default () => {
     slidesStore.updateSlideIndex(newIndex)
   }
 
-  const isEmptySlide = computed(() => {
-    if (slides.value.length > 1) return false
-    if (slides.value[0].elements.length > 0) return false
-    return true
-  })
-
   return {
     resetSlides,
     updateSlideIndex,
     copySlide,
     pasteSlide,
     createSlide,
-    createSlideByTemplate,
     copyAndPasteSlide,
     deleteSlide,
     cutSlide,
     selectAllSlide,
     sortSlides,
-    isEmptySlide,
   }
 }
