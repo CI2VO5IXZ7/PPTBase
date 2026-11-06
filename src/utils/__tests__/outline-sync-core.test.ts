@@ -63,7 +63,7 @@ test('飞行期间新输入：不混入 retried payload，成功后单独发送'
     return Promise.resolve(okWrite(2 + call, 2))
   })
   const core = new OutlineSyncCore(transport, {}, (() => {
-    let i = 0; return () => `r${++i}` 
+    let i = 0; return () => `r${++i}`
   })())
   core.version = 1; core.contentVersion = 1
   core.enqueue([{ a: 1 }])
@@ -109,7 +109,7 @@ test('409 正文变化：conflict + 草稿含全部未提交 steps', async () =>
   })))
   const conflicts: { remoteVersion: number }[] = []
   const core = new OutlineSyncCore(transport, { onConflict: i => {
-    conflicts.push(i) 
+    conflicts.push(i)
   } }, rid)
   core.version = 1; core.contentVersion = 1
   core.trackDoc({ type: 'doc', content: [] })
@@ -142,7 +142,7 @@ test('断线重连 pull：独立 GET；未提交时只更新版本不覆盖正�
   const applied: OutlineStateSnapshot[] = []
   const { transport } = fakeTransport(() => Promise.resolve(okWrite(11, 10)), () => remote)
   const core = new OutlineSyncCore(transport, { onRemoteState: s => {
-    applied.push(s) 
+    applied.push(s)
   } }, rid)
   // 无未提交 → 全量应用
   assert.equal(await core.pull(true), 'applied')
