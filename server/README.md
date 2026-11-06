@@ -211,6 +211,7 @@ mcp_servers:
 
 ```bash
 mkdir -p data                        # 先建好，否则 docker 自动创建会归 root 导致容器写不了
+chown 1001:1001 data                 # Playwright 镜像 pwuser UID/GID 1001
 docker compose build                 # 或 docker build -t pptist-app:local .
 docker compose up -d                 # 仅 app，宿主 127.0.0.1:3100（避开 3000/3030/4000）
 curl http://127.0.0.1:3100/api/health          # → {"ok":true}

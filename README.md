@@ -52,11 +52,12 @@ npm --prefix server run dev
 ### Self-host with Docker Compose (image includes Chromium)
 
 ```bash
-mkdir -p data            # create it yourself so the non-root container user can write
+mkdir -p data
+chown 1001:1001 data    # writable by the Playwright image non-root user (pwuser)
 docker compose up -d     # app only, http://127.0.0.1:3100
 curl http://127.0.0.1:3100/api/health
 
-docker compose exec app pptist-admin user create <name>   # prints the pk_ key once — save it
+docker compose exec app pptist-admin user create alice   # replace alice; prints the pk_ key once
 ```
 
 `docker compose --profile https up -d` additionally starts Caddy for automatic HTTPS — first set your real domain in `Caddyfile` and `PUBLIC_BASE_URL` in `docker-compose.yml`. The `https` profile is off by default; a plain `docker compose up -d` only starts the app. Full deployment notes: [server/README.md](server/README.md).

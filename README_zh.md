@@ -52,11 +52,12 @@ npm --prefix server run dev
 ### Docker Compose 自托管（镜像自带 Chromium）
 
 ```bash
-mkdir -p data            # 先自己建好，容器内非 root 用户才有权限写入
+mkdir -p data
+chown 1001:1001 data    # Playwright 镜像中非 root 用户 pwuser 可写
 docker compose up -d     # 仅 app，http://127.0.0.1:3100
 curl http://127.0.0.1:3100/api/health
 
-docker compose exec app pptist-admin user create <name>   # pk_ Key 只显示这一次，请保存
+docker compose exec app pptist-admin user create alice   # alice 可替换；pk_ Key 只显示这一次
 ```
 
 `docker compose --profile https up -d` 会额外启动 Caddy 自动签发 HTTPS——先把 `Caddyfile` 里的域名和 `docker-compose.yml` 里的 `PUBLIC_BASE_URL` 改成你的真实域名。`https` profile 默认不启用，普通 `docker compose up -d` 只起 app。完整部署说明见 [server/README.md](server/README.md)。
@@ -74,6 +75,7 @@ mcp_servers:
 ### 管理台
 
 - 首次管理员密码：用 `ADMIN_INITIAL_PASSWORD` 环境变量（≥10 字符，仅在库里还没有密码时播种），或执行 `pptist-admin passwd`。
+- 宿主不方便调整目录权限时，可把 Compose 的 data 绑定挂载改为 Docker named volume（卷名如 `pptist-data`），不要以 root 运行应用。
 - 入口：生产 `GET /admin`；Vite 开发模式下 `http://localhost:5173/admin.html`。
 
 ## 运维提示
