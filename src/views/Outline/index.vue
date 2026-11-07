@@ -214,8 +214,8 @@ const onBeforeUnload = (e: BeforeUnloadEvent) => {
 }
 
 // 有未保存内容或 IME 中：挂起远端刷新，避免重建编辑器打断输入
-watch(() => sync.hasUnsavedChanges(), v => {
-  suspendRefresh.value = v
+watch(() => outline.saveStatus, s => {
+  suspendRefresh.value = s === 'dirty' || s === 'saving' || s === 'conflict'
 }, { immediate: true })
 watch(() => outline.content, c => {
   if (c && !sync.hasUnsavedChanges()) editorContent.value = c
