@@ -116,6 +116,24 @@ test('2. 编辑+IME+撤销重做保存后刷新不丢', async ({ server, page, o
   await p.locator('.image-attrs select').selectOption('include')
   await p.locator('.image-attrs input').first().press('Tab')
   await waitSaved(p)
+  // 自身 SSE/同内容刷新：已提交的自身事件补拉不得重建文档 → 选择范围与撤销栈保留
+  await ed.locator('p').last().click()
+  await p.keyboard.press('End')
+  await p.keyboard.type('SEL-UNDO-7')
+  await waitSaved(p) // 本次 PATCH 的自身 outline 事件 → pull → doc.eq → 不重建
+  // Shift+Home 选中刚输入的行 → 记录选中范围；落定后同一范围必须仍在（重建会塌缩为空）
+  await p.keyboard.press('Shift+Home')
+  const selExpr = 'String(window.getSelection())'
+  const sel1 = await p.evaluate(selExpr)
+  expect(sel1).toContain('SEL-UNDO-7')
+  await p.waitForTimeout(600) // 自身事件补拉落定
+  const sel2 = await p.evaluate(selExpr)
+  expect(sel2).toBe(sel1)
+  await p.keyboard.press('ArrowRight') // 折叠选择
+  await p.keyboard.press('Control+z')
+  await expect(ed).not.toContainText('SEL-UNDO-7')
+  await p.keyboard.press('Control+Shift+z')
+  await expect(ed).toContainText('SEL-UNDO-7')
   await p.reload()
   await p.waitForSelector('.outline-editor .ProseMirror')
   await expect(ed).toContainText('中文大纲')
@@ -125,6 +143,39 @@ test('2. 编辑+IME+撤销重做保存后刷新不丢', async ({ server, page, o
   await expect(ed.locator('figure.outline-image img')).toBeVisible()
   await expect(ed.locator('figure.outline-image figcaption')).toContainText('封面图')
   await expect(ed.locator('figure.outline-image')).toHaveAttribute('data-usage', 'include')
+  // 合成中 + 远端正文变更：不得盲放旧位置 steps → 冲突保草稿（与 case2 元数据场景对照）
+  await p.route(`**/api/docs/${doc.docId}/outline`, async route => {
+    const rq = route.request()
+    if (rq.method() === 'PATCH') {
+      await new Promise(r => setTimeout(r, 600))
+      await route.continue()
+    }
+    else await route.continue()
+  })
+  await p.locator('.ProseMirror').evaluate(el => {
+    const win = (el.ownerDocument?.defaultView ?? globalThis) as { CompositionEvent?: new (t: string, i: { data?: string }) => Event }
+    el.dispatchEvent(new (win.CompositionEvent ?? Event)('compositionstart', { data: '' }))
+  })
+  await ed.locator('p').last().click()
+  await p.keyboard.type('COMPOSE-BODY-X')
+  const c9 = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  const delId = c9.content.content[0].attrs.blockId
+  const rd = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: c9.version,
+    ops: [{ op: 'deleteBlocks', blockIds: [delId] }],
+  })
+  expect(rd.status()).toBe(200)
+  await p.locator('.ProseMirror').evaluate(el => {
+    const win = (el.ownerDocument?.defaultView ?? globalThis) as { CompositionEvent?: new (t: string, i: { data?: string }) => Event }
+    el.dispatchEvent(new (win.CompositionEvent ?? Event)('compositionend', { data: '' }))
+  })
+  await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 15_000 })
+  // 草稿保留可恢复；刷新到最新版后状态恢复
+  await p.locator('button:has-text("复制草稿内容")').click()
+  const clip2 = await p.evaluate(() => (navigator as unknown as { clipboard: { readText(): Promise<string> } }).clipboard.readText())
+  expect(clip2).toContain('COMPOSE-BODY-X')
+  await p.locator('button:has-text("刷新为最新版本")').click()
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
 })
 
 // ── 例3：文字批注锚点映射与失效保留 ──
@@ -227,6 +278,9 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   await expect(thread(p)).toHaveCount(5)
   // 图片锚点线程的 anchor-desc 指向图片块
   await expect(p.locator('.comments-panel .anchor-desc').filter({ hasText: '图片' }).first()).toBeVisible()
+  // 有内容态截图：正文+图片+多锚点批注线程
+  const SHOTS = process.env.PPTBASE_E2E_OUT ?? '/home/dev/worklogs/pptbase-outlines/authorized-extra-round/playwright-results'
+  await p.screenshot({ path: `${SHOTS}/../screenshots/case4-filled.png`, fullPage: true })
 })
 
 // ── 例5：保存失败不可虚假成功；恢复后重试不重复记录 ──
@@ -247,29 +301,86 @@ test('5. 自动保存失败后提交/确认不虚假成功，恢复后重试', a
   const submitBtn = p.locator('button:has-text("提交反馈")')
 
   await expect(submitBtn).toBeDisabled()
-  // 恢复路由 → 自动重试保存
+  // 恢复路由 → 后台自动重试（无人工点击）：5s 退避后同 requestId 重发
   await p.unroute(`**/api/docs/${doc.docId}/outline`)
-  await p.locator('button:has-text("立即重试")').click()
-  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 15_000 })
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 20_000 })
   // 提交反馈成功且只生成一轮
   await submitBtn.click()
   await expect(p.locator('.submissions .sub-item').first()).toContainText('第 1 轮', { timeout: 10_000 })
   const list = await api(page.request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline/feedback`)
   expect((await list.json()).submissions.length).toBe(1)
-  // 提交后丢响应的重试语义：同 requestId+payload 的重复写服务端去重，不产生第二条修订/批注
+
+  // ── postcommit 丢响应：服务端已提交、客户端未见响应 → 自动重试同 requestId+payload+baseVersion → 幂等去重 ──
   const A = api(page.request, server.baseUrl, bearer(server.apiKey))
-  const st = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
-  const dup = { baseVersion: st.version, requestId: 'e2e-dedupe-c5', ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: '去重批注' }] }
-  const d1 = await A.post(`/api/docs/${doc.docId}/outline/ops`, dup)
-  expect(d1.status()).toBe(200)
-  const j1 = await d1.json()
-  // 丢响应重试：客户端原样重发同 requestId+同 baseVersion+同 ops（不是改版本号的新请求）
-  const d2 = await A.post(`/api/docs/${doc.docId}/outline/ops`, dup)
-  const j2 = await d2.json()
-  expect(j2.deduplicated).toBe(true)
-  expect(j2.version).toBe(j1.version)
-  const st2 = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
-  expect(st2.threads.filter((t: { messages: { content: string }[] }) => t.messages[0]?.content === '去重批注').length).toBe(1)
+  const rids: string[] = []
+  const patchJsons: Record<string, unknown>[] = []
+  p.on('response', r => {
+    if (r.url().endsWith('/outline') && r.request().method() === 'PATCH' && r.status() === 200) {
+      void r.json().then(j => patchJsons.push(j as Record<string, unknown>)).catch(() => undefined)
+    }
+  })
+  // 路由层捕获：拦截器必见每个 PATCH；首个放行提交后丢响应
+  let droppedOnce = false
+  await p.route(`**/api/docs/${doc.docId}/outline`, async route => {
+    const rq = route.request()
+    if (rq.method() === 'PATCH') {
+      try { rids.push(String(rq.postDataJSON()?.requestId)) } catch { rids.push('?') }
+      if (!droppedOnce) {
+        droppedOnce = true
+        try { await route.fetch() } catch { /* 服务端可能已提交 */ }
+        await route.abort('failed') // 客户端只见网络失败，不确定是否已提交
+        return
+      }
+    }
+    await route.continue()
+  })
+  await ed.locator('p').first().click()
+  await p.keyboard.press('End')
+  await p.keyboard.type('LOST-RESPONSE-XY')
+  // 先证 steps 已进入未提交队列（防止「已保存」假阳性掩盖步骤丢失）
+  await expect(p.locator('.save')).toContainText(/未保存|保存中/, { timeout: 5000 })
+  // 零人工操作：offline 退避后自动重试同一 in-flight 批次
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 25_000 })
+  expect(rids.length).toBe(2)
+  expect(rids[1]).toBe(rids[0])
+  expect(patchJsons.at(-1)?.deduplicated).toBe(true)
+  const stL = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(JSON.stringify(stL.content).match(/LOST-RESPONSE-XY/g)?.length).toBe(1)
+
+  // ── metadata-only 409：无人工操作自动续传；飞行期间新输入形成下一批自动完成 ──
+  await p.route(`**/api/docs/${doc.docId}/outline`, async route => {
+    const rq = route.request()
+    if (rq.method() === 'PATCH') {
+      await new Promise(r => setTimeout(r, 600))
+      await route.continue()
+    }
+    else await route.continue()
+  })
+  const m0 = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  await ed.locator('p').first().click()
+  await p.keyboard.press('End')
+  await p.keyboard.type('META-409-A')
+  await expect(p.locator('.save')).toContainText(/未保存|保存中/, { timeout: 5000 })
+  // 本地 PATCH 飞行/未发期间远端仅推进元数据（批注 → version+1、contentVersion 不变）
+  const ro = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: m0.version,
+    ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: '元数据推进批注' }],
+  })
+  expect(ro.status()).toBe(200)
+  await p.waitForTimeout(300)
+  await p.keyboard.type('META-409-B') // 飞行期间新输入 → 自动并入后续批次
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 25_000 })
+  await expect(ed).toContainText('META-409-A')
+  await expect(ed).toContainText('META-409-B')
+  await expect(thread(p).filter({ hasText: '元数据推进批注' })).toBeVisible({ timeout: 10_000 })
+  await expect(p.locator('.banner.conflict')).not.toBeVisible()
+  // 元数据409重试沿用同 requestId；飞行新输入并入后续批（新 rid 或并入重试批均合法，但必须单份落库）
+  expect(rids[3]).toBe(rids[2])
+  if (rids.length > 4) expect(rids[4]).not.toBe(rids[2])
+  const stM = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  const body = JSON.stringify(stM.content)
+  expect(body.match(/META-409-A/g)?.length).toBe(1)
+  expect(body.match(/META-409-B/g)?.length).toBe(1)
 })
 
 // ── 例6：提交后继续编辑，区分已提交与未提交；Agent 读所选轮次快照 ──

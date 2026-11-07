@@ -103,7 +103,9 @@ const saveText = computed(() => ({
   saved: '已保存', saving: '保存中…', dirty: '未保存', offline: '保存失败', conflict: '版本冲突',
 } as Record<string, string>)[outline.saveStatus])
 
-const onSteps = (steps: Record<string, unknown>[]) => sync.enqueueSteps(steps)
+const onSteps = (steps: Record<string, unknown>[]) => {
+  sync.enqueueSteps(steps)
+}
 
 const onThreadOp = async (op: Record<string, unknown>) => {
   if (outline.readonly) return

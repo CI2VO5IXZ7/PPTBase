@@ -66,6 +66,9 @@ export class OutlineSyncCore {
   lastError = ''
   // 冲突时保留的本地草稿（正文 + 全部未提交 steps）
   localDraft: { content: Record<string, unknown> | null, steps: StepJson[] } | null = null
+  // 编辑器 300ms 聚合缓冲内尚未 emit 到队列的本地输入：补拉/远端应用同样视为「有未提交内容」
+  buffered = false
+  setBuffered(v: boolean) { this.buffered = v }
   // 输入中/IME 期间收到的远端更新挂起
   remotePullPending = false
   private flushing = false
@@ -192,7 +195,7 @@ export class OutlineSyncCore {
   // 不覆盖本地正文；无未提交内容才允许外层应用全量状态。
   async pull(applyRemote: boolean): Promise<'applied' | 'deferred' | 'meta-only'> {
     const state = await this.transport.getState()
-    if (this.queue.size) {
+    if (this.queue.size || this.buffered) {
       // 远端正文已变 + 本地未提交 steps：不得推进版本盲放旧位置 steps → 进入冲突保草稿
       if (state.contentVersion > this.contentVersion) {
         this.remotePullPending = true
@@ -240,7 +243,7 @@ export class OutlineSyncCore {
   // SSE 远端事件入口：有未提交 steps/in-flight 或合成中 → 挂起，flush/合成结束后补拉；
   // 安全时机返回 true，调用方执行 pull(true)。
   requestPull(deferring: boolean): boolean {
-    if (this.queue.size || this.queue.inFlight || deferring) {
+    if (this.queue.size || this.queue.inFlight || this.buffered || deferring) {
       this.remotePullPending = true
       return false
     }

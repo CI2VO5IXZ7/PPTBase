@@ -34,6 +34,7 @@ export default function useOutlineSync() {
     },
     {
       onStatus: (s, error) => {
+        if (s === 'saved') core.setBuffered(false)
         outline.setSaveStatus(s)
         outline.lastError = error ?? ''
       },
@@ -51,11 +52,12 @@ export default function useOutlineSync() {
 
   // 远端状态应用到 store：仅在无未提交内容时替换正文（避免覆盖正在输入的文本）
   function applyRemoteState(state: OutlineStateSnapshot) {
-    if (core.pendingCount || composing) {
+    if (core.pendingCount || core.buffered || composing) {
       core.remotePullPending = true
       outline.setVersions(state.version, outline.contentVersion)
       return
     }
+    core.setBuffered(false)
     outline.load({
       docId: documentStore.docId,
       // 服务端返回的权威角色；不默认降级 view（否则编辑令牌被锁死）
@@ -112,9 +114,13 @@ export default function useOutlineSync() {
       void core.pull(true)
     }
   }
-  const trackEditorDoc = (doc: Record<string, unknown>) => core.trackDoc(doc)
+  const trackEditorDoc = (doc: Record<string, unknown>) => {
+    core.trackDoc(doc)
+    core.setBuffered(true) // 编辑器 300ms 聚合未落队，同样按未提交内容保护
+  }
 
   async function resolveConflict() {
+    core.setBuffered(false)
     await core.resolveConflict()
     outline.conflictRemote = null
   }
