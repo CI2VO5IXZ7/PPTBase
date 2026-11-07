@@ -103,7 +103,7 @@ test('3. 文字批注：前插字仍正确定位；删原文后显示脱离引�
   for (let i = 0; i < 4; i++) await p.keyboard.press('Shift+ArrowRight')
   // 先注册 dialog 监听器再点击（点击触发 prompt 输入批注内容）
   p.once('dialog', d => {
-    void d.accept('这是重点') 
+    void d.accept('这是重点')
   })
   await p.locator('.outline-toolbar .comment-btn').click()
   await expect(thread(p).first()).toBeVisible({ timeout: 10_000 })
@@ -130,7 +130,7 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   await p.keyboard.type('第一段\n第二段')
   // 文档级批注（面板按钮）
   p.once('dialog', d => {
-    void d.accept('全文意见') 
+    void d.accept('全文意见')
   })
   await p.locator('.comments-panel .new-btn').click()
   // 跨段选区批注
@@ -139,7 +139,7 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   for (let i = 0; i < 9; i++) await p.keyboard.press('ArrowRight')
   await p.keyboard.up('Shift')
   p.once('dialog', d => {
-    void d.accept('跨段批注') 
+    void d.accept('跨段批注')
   })
   await p.locator('.outline-toolbar .comment-btn').click()
   await expect(thread(p)).toHaveCount(2, { timeout: 10_000 })
