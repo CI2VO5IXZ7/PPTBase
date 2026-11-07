@@ -141,8 +141,11 @@ export default function useOutlineSync() {
       flushTimer = null
     }
     core.setBuffered(false)
-    await core.resolveConflict()
-    outline.conflictRemote = null
+    // core 纪元守卫：被更新 resolve 取代的重叠调用返回 null 且已无任何副作用
+    // （未动版本/队列/草稿，未触发 onRemoteState/onDraft/onVersion）；conflictRemote
+    // 只由真正应用了快照的调用清除——null 时在途的新 resolve 完成时会自行清理
+    const state = await core.resolveConflict()
+    if (state) outline.conflictRemote = null
   }
 
   // 只有全部成功才置 initialized；失败清理已挂订阅/定时器，保持可重试

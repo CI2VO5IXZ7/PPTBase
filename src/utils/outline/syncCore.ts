@@ -20,6 +20,8 @@
 //  - resolveConflict 递增 resetEpoch：在途 flush 的迟到结果（成功/409/5xx）纪元不符即整体
 //    丢弃，不回滚版本、不改状态、不触发事件、不重建草稿；同时结清 buffered/remotePullPending
 //    /composing；drain 全程校验纪元，期间发生 resolve 即返回 false——队空是清出来的不是发完的；
+//    重叠的 resolveConflict 同理：自身 GET 返回时纪元已被更新调用抬高即整体丢弃返回 null，
+//    后到旧快照不得回滚新 resolve 已应用的版本/远端状态、不得重复移交草稿；
 //  - drain 失败退避按剩余时限截断，不超 maxWaitMs 预算空等。
 
 import { StepsQueue } from './pendingSteps.ts'
@@ -105,7 +107,7 @@ export class OutlineSyncCore {
   private conflictRemoteContentVersion = 0
   // 用户显式丢弃草稿后置位：resolveConflict 不得从队列复活草稿；新冲突入口复位
   private draftDropped = false
-  // resolveConflict 纪元：每次调用 +1，使在途 flush 的迟到结果整体失效
+  // resolveConflict 纪元：每次调用 +1，使在途 flush/重叠 resolve 的迟到结果整体失效
   private resetEpoch = 0
   // 输入中/IME 期间收到的远端更新挂起
   remotePullPending = false
@@ -355,11 +357,20 @@ export class OutlineSyncCore {
   }
 
   // 冲突后：取回最新版；本地草稿经 onDraft 移交外层（store）保留供复制/人工迁移，
-  // 移交后 localDraft 置空隔离——解决后的正常编辑不得再改写已归档草稿
-  async resolveConflict(): Promise<OutlineStateSnapshot> {
-    // 先抬纪元再拉取：使在途 flush 的迟到结果整体失效，不得回滚已解决状态
+  // 移交后 localDraft 置空隔离——解决后的正常编辑不得再改写已归档草稿。
+  // 返回契约：正常应用返回拉取的快照；纪元已失效的重叠调用返回 null（core 内无法如实
+  // 构造 content/threads/status 的「当前」快照，故用哨兵而非编造——调用方只需知道
+  // null = 本次未应用任何状态，不产生任何副作用）
+  async resolveConflict(): Promise<OutlineStateSnapshot | null> {
+    // 先抬纪元再拉取：使在途 flush 的迟到结果整体失效，不得回滚已解决状态；
+    // 记下本纪元供 GET 返回时校验重叠 resolve
     this.resetEpoch++
+    const epoch = this.resetEpoch
     const state = await this.transport.getState()
+    // 重叠 resolve：更新的调用已抬纪元（其结果将/已应用），本次旧快照整体丢弃——
+    // 不动版本、不改状态、不清队列、不移交草稿、不触发 onRemoteState/onVersion 等任何事件；
+    // 否则后到的旧 GET 会把编辑器和版本回滚到新 resolve 之前
+    if (epoch !== this.resetEpoch) return null
     this.version = state.version
     this.contentVersion = state.contentVersion
     this.conflictRemoteVersion = 0

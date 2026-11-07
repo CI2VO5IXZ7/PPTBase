@@ -29,7 +29,7 @@
     <div v-if="outline.saveStatus === 'conflict' || outline.localDraft" class="banner conflict">
       <template v-if="outline.saveStatus === 'conflict'">版本冲突：远端已到 v{{ outline.conflictRemote?.version }}（c{{ outline.conflictRemote?.contentVersion }}）。</template>
       本地未提交修改已保存为草稿（{{ draftSteps }} 步），不会自动丢弃。
-      <button v-if="outline.saveStatus === 'conflict'" class="btn" @click="onDiscardDraft">刷新为最新版本（保留草稿）</button>
+      <button v-if="outline.saveStatus === 'conflict'" class="btn" :disabled="resolving" @click="onDiscardDraft">刷新为最新版本（保留草稿）</button>
       <button v-if="outline.localDraft" class="btn" @click="copyDraft">复制草稿内容</button>
       <button v-if="outline.localDraft" class="btn" @click="onDropDraft">丢弃草稿</button>
     </div>
@@ -208,6 +208,9 @@ const onRevoke = async () => {
 
 // 冲突：刷新为最新版本，本地草稿保留可复制
 const onDiscardDraft = async () => {
+  // 在途 resolve 不得再触发新一次：core 虽有纪元丢弃兜底，按钮禁用+此守卫避免
+  // 无意义的重叠 GET（旧纪元结果会被整体丢弃）
+  if (resolving.value) return
   // 先禁编再冲刷：解决期间（getState 在途）不得再产生基于旧文档的新 steps
   resolving.value = true
   try {

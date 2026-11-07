@@ -811,3 +811,89 @@ test('resolveConflict 复位 composing：残留组合态不得阻塞远端应用
   assert.equal(core.version, 10)
   assert.equal(core.contentVersion, 8)
 })
+
+// 30. 重叠 resolveConflict：旧 GET 后到时纪元已失效 → 返回 null 且整体丢弃，
+//     不回滚版本、不重发 onRemoteState、不重复移交草稿
+test('重叠 resolveConflict：后到的旧 GET 返回 null 且无副作用，版本停在较新快照', async () => {
+  const resolvers: ((s: OutlineStateSnapshot) => void)[] = []
+  const transport = {
+    getState: () => new Promise<OutlineStateSnapshot>(r => resolvers.push(r)),
+    patchSteps: () => Promise.resolve(okWrite(9, 9)),
+  }
+  const applied: OutlineStateSnapshot[] = []
+  const handed: { content: Record<string, unknown> | null, steps: StepJson[] }[] = []
+  const versions: [number, number][] = []
+  const core = new OutlineSyncCore(transport, {
+    onRemoteState: s => applied.push(s),
+    onDraft: d => handed.push(d),
+    onVersion: (v, cv) => versions.push([v, cv]),
+  }, rid)
+  core.version = 1; core.contentVersion = 1
+  core.trackDoc({ v: 1 })
+  core.enqueue([{ a: 1 }])
+  // 远端 cv3 > 本地 cv1 → 进冲突，草稿 { v:1, [a:1] }；pull 冲突分支发一次 onRemoteState
+  const p = core.pull(true)
+  resolvers[0]({ version: 5, contentVersion: 3, content: { type: 'doc' }, threads: [], status: null })
+  assert.equal(await p, 'deferred')
+  assert.equal(core.status, 'conflict')
+  assert.equal(applied.length, 1)
+  // 两次重叠 resolve：first 记纪元 e1、second 抬到 e2；
+  // second 的 GET（resolvers[2]，较新快照 v9/cv7）先返回并应用
+  const first = core.resolveConflict()
+  const second = core.resolveConflict()
+  resolvers[2]({ version: 9, contentVersion: 7, content: { type: 'doc', n: 9 }, threads: [], status: null })
+  const secondState = await second
+  assert.equal(secondState!.version, 9)
+  assert.equal(core.version, 9)
+  assert.equal(core.contentVersion, 7)
+  assert.equal(core.status, 'saved')
+  assert.equal(core.queue.size, 0)
+  assert.equal(applied.length, 2)
+  assert.equal(applied[1].version, 9)
+  assert.equal(handed.length, 1)
+  assert.deepEqual(handed[0].steps, [{ a: 1 }])
+  // first 的旧 GET（resolvers[1]，v6/cv4）后到：纪元已变 → 返回 null，
+  // 不回滚版本/状态、不重发 onRemoteState、不重复移交草稿、不触发 onVersion
+  resolvers[1]({ version: 6, contentVersion: 4, content: { type: 'doc', n: 6 }, threads: [], status: null })
+  assert.equal(await first, null)
+  assert.equal(core.version, 9)
+  assert.equal(core.contentVersion, 7)
+  assert.equal(core.status, 'saved')
+  assert.equal(applied.length, 2, '被丢弃的旧 GET 不得再触发 onRemoteState')
+  assert.equal(handed.length, 1, '被丢弃的旧 GET 不得重复移交草稿')
+  assert.equal(versions.length, 0, 'resolve 路径不触发 onVersion；丢弃路径更不得触发')
+  assert.equal(core.localDraft, null)
+})
+
+// 31. 单次 resolveConflict 行为不变：推进版本、onRemoteState/onDraft 各一次、
+//     返回应用的快照、状态回 saved
+test('单次 resolveConflict：返回应用快照，版本推进，远端应用与草稿移交各一次', async () => {
+  const { transport } = fakeTransport(() => Promise.resolve(okWrite(9, 9)))
+  transport.setRemote({ version: 5, contentVersion: 3, content: { type: 'doc' }, threads: [], status: null })
+  const applied: OutlineStateSnapshot[] = []
+  const handed: { content: Record<string, unknown> | null, steps: StepJson[] }[] = []
+  const core = new OutlineSyncCore(transport, {
+    onRemoteState: s => applied.push(s),
+    onDraft: d => handed.push(d),
+  }, rid)
+  core.version = 1; core.contentVersion = 1
+  core.trackDoc({ v: 1 })
+  core.enqueue([{ a: 1 }])
+  assert.equal(await core.pull(true), 'deferred') // 远端 cv3 > 本地 cv1 → conflict
+  assert.equal(core.status, 'conflict')
+  assert.equal(applied.length, 1)
+  transport.setRemote({ version: 9, contentVersion: 7, content: { type: 'doc', remote: true }, threads: [], status: null })
+  const state = await core.resolveConflict()
+  assert.ok(state)
+  assert.equal(state.version, 9)
+  assert.equal(state.contentVersion, 7)
+  assert.equal(core.version, 9)
+  assert.equal(core.contentVersion, 7)
+  assert.equal(core.status, 'saved')
+  assert.equal(core.queue.size, 0)
+  assert.equal(applied.length, 2, 'pull 冲突分支 + resolve 各触发一次 onRemoteState')
+  assert.equal(applied[1].version, 9)
+  assert.equal(handed.length, 1)
+  assert.deepEqual(handed[0].content, { v: 1 })
+  assert.deepEqual(handed[0].steps, [{ a: 1 }])
+})
