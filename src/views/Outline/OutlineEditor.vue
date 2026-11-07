@@ -30,9 +30,11 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useOutlineStore } from '@/store/outline'
-import { EditorState, Plugin, PluginKey, type Command, type Transaction } from 'prosemirror-state'
-import { EditorView, type DecorationSet } from 'prosemirror-view'
-import { buildThreadDecorations } from '@/utils/outline/threadDeco'
+import { EditorState, PluginKey, type Command } from 'prosemirror-state'
+import type { Step } from 'prosemirror-transform'
+import { EditorView } from 'prosemirror-view'
+import { createThreadDecoPlugin } from '@/utils/outline/threadDeco'
+import { createBlockIdPlugin } from '@/utils/outline/blockIds'
 import { imageAttrsTr } from '@/utils/outline/imageOps'
 import { undo, redo, history } from 'prosemirror-history'
 import { keymap } from 'prosemirror-keymap'
@@ -69,6 +71,7 @@ const uploadingCount = computed(() => uploads.value.filter(u => u.status !== 'do
 
 let view: EditorView | null = null
 const pendingSteps: Record<string, unknown>[] = []
+const appendedSteps: Step[] = [] // appendTransaction 补的 blockId 修正，必须与原始 steps 同批发送
 let flushTimer: ReturnType<typeof setTimeout> | null = null
 
 const blockIdKey = new PluginKey('outlineBlockIds')
@@ -76,25 +79,6 @@ const threadMarkKey = new PluginKey('outlineThreads')
 
 const S = outlineViewSchema
 
-// ── 稳定 blockId：新增/缺省/重复 id 一律重新生成（协作锚点依赖唯一性）──
-function ensureBlockIds(state: EditorState, tr: Transaction) {
-  const seen = new Set<string>()
-  const fixes: { pos: number, attrs: Record<string, unknown> }[] = []
-  tr.doc.descendants((node, pos) => {
-    if (!node.isBlock || node.type.name === 'doc') return true
-    const bid = String(node.attrs.blockId ?? '')
-    if (!bid || seen.has(bid)) fixes.push({ pos, attrs: { ...node.attrs, blockId: `b_${nanoid(10)}` } })
-    else seen.add(bid)
-    return true
-  })
-  for (const f of fixes) tr.setNodeMarkup(f.pos, undefined, f.attrs)
-  return fixes.length > 0
-}
-
-// ── 线程锚点 → decoration（跨区块 textRange 逐片段；block/image 整节点）──
-function threadDecorations(state: EditorState): DecorationSet {
-  return buildThreadDecorations(state.doc, props.threads)
-}
 
 // ── 工具栏命令 ──
 const cmd = (c: Command) => () => {
@@ -235,51 +219,43 @@ onMounted(() => {
       history(),
       keymap({ 'Mod-z': undo, 'Mod-y': redo, 'Mod-Shift-z': redo, 'Mod-b': toggleMark(S.marks.strong), 'Mod-i': toggleMark(S.marks.em), 'Enter': chainCommands(splitListItem(S.nodes.list_item), exitCode) }),
       keymap(baseKeymap),
-      new Plugin({
-        key: blockIdKey,
-        appendTransaction(transactions, _old, newState) {
-          if (transactions.every(t => !t.docChanged)) return
-          const tr = newState.tr
-          return ensureBlockIds(newState, tr) ? tr : null
-        },
-      }),
-      new Plugin({
-        key: threadMarkKey,
-        props: {
-          decorations: state => threadDecorations(state),
-          handleDOMEvents: {
-            compositionstart: () => {
-              emit('composing', true); return false
-            },
-            compositionend: () => {
-              emit('composing', false); return false
-            },
-            click: (_v, event) => {
-              const pos = view?.posAtCoords({ left: event.clientX, top: event.clientY })
-              if (!pos || !view) return false
-              // atom 叶子节点：pos.pos 命中节点起点；pos.inside 只会是父容器
-              for (const cand of [pos.pos, pos.inside]) {
-                const n = cand >= 0 ? view.state.doc.nodeAt(cand) : null
-                if (n?.type.name === 'image') {
-                  openImageAttrs(cand); return true
-                }
+      createBlockIdPlugin(blockIdKey, steps => appendedSteps.push(...steps)),
+      createThreadDecoPlugin(threadMarkKey, () => props.threads, {
+        handleDOMEvents: {
+          compositionstart: () => {
+            emit('composing', true); return false
+          },
+          compositionend: () => {
+            emit('composing', false); return false
+          },
+          click: (_v, event) => {
+            const pos = view?.posAtCoords({ left: event.clientX, top: event.clientY })
+            if (!pos || !view) return false
+            // atom 叶子节点：pos.pos 命中节点起点；pos.inside 只会是父容器
+            for (const cand of [pos.pos, pos.inside]) {
+              const n = cand >= 0 ? view.state.doc.nodeAt(cand) : null
+              if (n?.type.name === 'image') {
+                openImageAttrs(cand); return true
               }
-              return false
-            },
-            paste: (_v, event) => {
-              const files = Array.from(event.clipboardData?.files ?? []).filter(f => f.type.startsWith('image/'))
-              if (!files.length || props.readonly) return false
-              event.preventDefault(); void insertImages(files); return true
-            },
-            drop: (_v, event) => {
-              const files = Array.from(event.dataTransfer?.files ?? []).filter(f => f.type.startsWith('image/'))
-              if (!files.length || props.readonly) return false
-              event.preventDefault(); void insertImages(files); return true
-            },
+            }
+            return false
+          },
+          paste: (_v, event) => {
+            const files = Array.from(event.clipboardData?.files ?? []).filter(f => f.type.startsWith('image/'))
+            if (!files.length || props.readonly) return false
+            event.preventDefault(); void insertImages(files); return true
+          },
+          drop: (_v, event) => {
+            const files = Array.from(event.clipboardData?.files ?? []).filter(f => f.type.startsWith('image/'))
+            if (!files.length || props.readonly) return false
+            event.preventDefault(); void insertImages(files); return true
           },
         },
       }),
     ],
+  })
+  watch(() => props.threads, () => {
+    if (view) view.dispatch(view.state.tr) // 线程快照变化 → 装饰插件按签名整体重建
   })
   view = new EditorView(editorRef.value!, {
     state,
@@ -293,8 +269,9 @@ onMounted(() => {
         if (!n || n.type.name !== 'image' || n.attrs.blockId !== imageSel.value.blockId) imageSel.value = null
       }
       if (tr.docChanged) {
-        // 收集全部实际 step（含 appendTransaction 补的 blockId 修正）
+        // 收集全部实际 step：原始 tr.steps + appendTransaction 补的 blockId 修正
         for (const step of tr.steps) pendingSteps.push(step.toJSON() as Record<string, unknown>)
+        for (const step of appendedSteps.splice(0)) pendingSteps.push(step.toJSON() as Record<string, unknown>)
         emit('doc-json', newState.doc.toJSON() as Record<string, unknown>)
         if (flushTimer) clearTimeout(flushTimer)
         flushTimer = setTimeout(() => {
