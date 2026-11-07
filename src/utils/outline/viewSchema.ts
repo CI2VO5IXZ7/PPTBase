@@ -1,7 +1,7 @@
 // 仅浏览器使用的视图 schema：在共享 DOM 无关 schema 的 node/mark spec 上
 // 叠加 toDOM/parseDOM，供 EditorView 渲染与粘贴解析；不影响服务端共享语义。
 import { Schema, type DOMOutputSpec, type MarkSpec, type NodeSpec } from 'prosemirror-model'
-import { outlineSchema } from './schema'
+import { IMAGE_USAGES, outlineSchema } from './schema'
 
 const BID = 'data-block-id'
 // parseDOM 回调不直接引用 DOM lib 类型（服务端无 DOM 类型也可编译）；入参 unknown + 结构化断言
@@ -55,16 +55,20 @@ const NODE_DOM: Record<string, { toDOM: NodeSpec['toDOM'], parseDOM?: NodeSpec['
         getAttrs: (d: unknown) => {
           const img = dom(d).querySelector('img')
           const src = img?.getAttribute('src') ?? ''
-          if (src && !SAFE_ASSET_SRC.test(src)) return false
+          // 空 src/外链一律拒绝：空 src 会生成服务端拒收的 image 节点并卡死保存队列
+          if (!SAFE_ASSET_SRC.test(src)) return false
           const dataCaption = dom(d).getAttribute('data-caption')
+          const usageAttr = dom(d).getAttribute('data-usage')
           return {
             blockId: dom(d).getAttribute(BID) ?? '',
             src,
             alt: img?.getAttribute('alt') ?? '',
             caption: dataCaption ?? dom(d).querySelector('figcaption')?.textContent ?? '',
-            usage: (dom(d).getAttribute('data-usage') as 'include' | 'reference') ?? 'reference',
-            usageDescription: dom(d).getAttribute('data-usage-desc') ?? '',
-            assetId: dom(d).getAttribute('data-asset-id') ?? assetIdFromSrc(src),
+            // 非法 usage 回退 reference（不信任粘贴属性；抛 RangeError 会炸掉整个粘贴）
+            usage: IMAGE_USAGES.includes(usageAttr as 'include' | 'reference') ? usageAttr as 'include' | 'reference' : 'reference',
+            usageDescription: (dom(d).getAttribute('data-usage-desc') ?? '').slice(0, 200),
+            // assetId 只从 src 推导，不信任粘贴的 data-asset-id（服务端仍做属主校验）
+            assetId: assetIdFromSrc(src),
           }
         },
       },

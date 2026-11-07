@@ -126,9 +126,9 @@ export default function useOutlineSync() {
     unsubscribe = subscribe(
       documentStore.docId,
       () => undefined,
-      // outline 事件：有未提交内容时延迟到安全时机
+      // outline 事件（含自身 PATCH 的服务端映射回执）：未提交/合成中置延迟标记，安全后补拉
       () => {
-        if (!core.pendingCount && !composing) void core.pull(true)
+        if (core.requestPull(composing)) void core.pull(true)
       },
       // 断线重连：独立 GET 补拉，不依赖事件回放
       () => {

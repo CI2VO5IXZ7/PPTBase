@@ -223,6 +223,16 @@ export class OutlineSyncCore {
     this.localDraft = null
   }
 
+  // SSE 远端事件入口：有未提交 steps/in-flight 或合成中 → 挂起，flush/合成结束后补拉；
+  // 安全时机返回 true，调用方执行 pull(true)。
+  requestPull(deferring: boolean): boolean {
+    if (this.queue.size || this.queue.inFlight || deferring) {
+      this.remotePullPending = true
+      return false
+    }
+    return true
+  }
+
   get pendingCount() {
     return this.queue.size
   }

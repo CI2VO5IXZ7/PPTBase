@@ -120,7 +120,7 @@ export function assetManifest(doc: PMNode): OutlineAssetRef[] {
 function topLevelIds(doc: PMNode): string[] {
   const ids: string[] = []
   doc.forEach(node => {
-    if (hasBlockId(node)) ids.push(String(node.attrs.blockId)) 
+    if (hasBlockId(node)) ids.push(String(node.attrs.blockId))
   })
   return ids
 }

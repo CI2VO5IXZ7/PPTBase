@@ -67,7 +67,9 @@ import { computed, nextTick, ref, useTemplateRef, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMainStore, useSlidesStore, useDocumentStore } from '@/store'
 import useScreening from '@/hooks/useScreening'
+import { docSyncController } from '@/hooks/useDocumentSync'
 import message from '@/utils/message'
+
 import type { DialogForExportTypes } from '@/types/export'
 
 import HotkeyDoc from './HotkeyDoc.vue'
@@ -115,9 +117,17 @@ watch(lastRemoteSummary, summary => {
   message.info(summary.slice(0, 3).join('；'), { title: 'Agent 更新了文档' })
 })
 
-const openOutline = () => {
+const openOutline = async () => {
   mainMenuVisible.value = false
-  if (outlineUrl.value) window.location.href = outlineUrl.value
+  if (!outlineUrl.value) return
+  // 先冲刷 1.5s debounce 里的未保存 PPT 修改；失败/离线时确认后才离开
+  const sync = docSyncController.current
+  if (sync?.hasUnsavedChanges()) {
+    await sync.flushNow()
+    if (sync.hasUnsavedChanges()
+      && !window.confirm('PPT 修改尚未保存成功（离线/冲突），现在离开可能丢失。仍要进入大纲？')) return
+  }
+  window.location.href = outlineUrl.value
 }
 
 const copyViewLink = async () => {

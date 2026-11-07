@@ -180,3 +180,37 @@ test('4xx：回队首保留 + offline（不伪装已保存）', async () => {
   assert.equal(core.status, 'offline')
   assert.equal(core.queue.size, 1)
 })
+
+// 9. SSE 事件节流：pending/in-flight/合成中置 remotePullPending，安全时机直拉
+test('SSE 事件 → requestPull：有未提交/合成中挂起，安全时机返回 true', async () => {
+  const calls: { steps: unknown[] }[] = []
+  const transport = {
+    patch: (p: { steps: unknown[] }) => {
+      calls.push(p)
+      return Promise.resolve({ ok: true as const, version: 2, contentVersion: 2 })
+    },
+    getState: () => Promise.resolve({
+      docId: 'd', version: 3, contentVersion: 3, title: '', content: null,
+      threads: [], submissions: [], approvals: [], readonly: false, role: 'edit' as const,
+    }),
+  }
+  const core = new OutlineSyncCore(transport, {}, () => 'r')
+  // 队列非空 → 挂起
+  core.enqueue([{ a: 1 }])
+  assert.equal(core.requestPull(false), false)
+  assert.equal(core.remotePullPending, true)
+  // 合成中 → 挂起
+  core.queue.clear()
+  assert.equal(core.requestPull(true), false)
+  assert.equal(core.remotePullPending, true)
+  // 干净时机 → 允许立即 pull
+  core.remotePullPending = false
+  assert.equal(core.requestPull(false), true)
+  assert.equal(core.remotePullPending, false)
+  // in-flight 期间 → 挂起（不丢服务端映射回执）
+  core.enqueue([{ b: 2 }])
+  const flushing = core.flush()
+  assert.equal(core.requestPull(false), false)
+  assert.equal(core.remotePullPending, true)
+  await flushing
+})

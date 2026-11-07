@@ -46,7 +46,7 @@ export const outlineSchema = new Schema({
       group: 'block',
       content: 'inline*',
       attrs: { level: { default: 1, validate: (v: unknown) => {
-        if (v !== 1 && v !== 2 && v !== 3) throw new RangeError('heading level 必须是 1~3') 
+        if (v !== 1 && v !== 2 && v !== 3) throw new RangeError('heading level 必须是 1~3')
       } }, blockId },
       defining: true,
     },
@@ -65,7 +65,7 @@ export const outlineSchema = new Schema({
       group: 'block',
       content: 'list_item+',
       attrs: { blockId, order: { default: 1, validate: (v: unknown) => {
-        if (!Number.isInteger(v) || (v as number) < 1) throw new RangeError('order 必须是正整数') 
+        if (!Number.isInteger(v) || (v as number) < 1) throw new RangeError('order 必须是正整数')
       } } },
     },
     list_item: {
@@ -82,7 +82,7 @@ export const outlineSchema = new Schema({
         alt: { default: '' },
         caption: { default: '' },
         usage: { default: 'reference', validate: (v: unknown) => {
-          if (!IMAGE_USAGES.includes(v as never)) throw new RangeError('usage 必须是 reference|include') 
+          if (!IMAGE_USAGES.includes(v as never)) throw new RangeError('usage 必须是 reference|include')
         } },
         usageDescription: { default: '' },
         assetId: { default: '' },

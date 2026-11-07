@@ -151,6 +151,40 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   })
   await p.locator('.outline-toolbar .comment-btn').click()
   await expect(thread(p)).toHaveCount(2, { timeout: 10_000 })
+  // 块级锚点：光标折叠在第二段（不选字）→ 批注 → block 锚点
+  await p.keyboard.press('Control+End')
+  p.once('dialog', d => {
+    void d.accept('块批注')
+  })
+  await p.locator('.outline-toolbar .comment-btn').click()
+  await expect(thread(p)).toHaveCount(3, { timeout: 10_000 })
+  // 图片锚点：经 REST 插入图片块后，点击图片选中原子节点 → 批注 → image 锚点
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, {
+    data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  }).then(async r => {
+    const a = await r.json()
+    await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline/ops`, {
+      baseVersion: 2,
+      ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'im4', src: a.url } }] }],
+    })
+  })
+  await p.reload(); await p.waitForSelector('.outline-editor .ProseMirror')
+  await ed.locator('figure.outline-image img').click()
+  p.once('dialog', d => {
+    void d.accept('图片批注')
+  })
+  await p.locator('.outline-toolbar .comment-btn').click()
+  await expect(thread(p)).toHaveCount(4, { timeout: 10_000 })
+  // 重叠 textRange：与第一个跨段批注范围重叠的第二个批注共存
+  await p.keyboard.press('Control+Home')
+  await p.keyboard.down('Shift')
+  for (let i = 0; i < 5; i++) await p.keyboard.press('ArrowRight')
+  await p.keyboard.up('Shift')
+  p.once('dialog', d => {
+    void d.accept('重叠批注')
+  })
+  await p.locator('.outline-toolbar .comment-btn').click()
+  await expect(thread(p)).toHaveCount(5, { timeout: 10_000 })
   // 回复 + 解决 + 重开
   await thread(p).first().locator('.reply').fill('收到')
   await thread(p).first().locator('.reply').press('Enter')
@@ -224,7 +258,7 @@ test('7. Agent 读取素材清单与图片内容块', async ({ server, request }
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   // 上传资产并经 REST 插入图片块（UI 上传路径由例2覆盖；本例验证 REST/MCP 侧契约）
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: { data: PNG } })
+  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
   const asset = await up.json()
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline/ops`, {
     baseVersion: 1,
@@ -373,18 +407,28 @@ test('12. 权限边界', async ({ server, page, request }) => {
   expect(foreignAsset.isError).toBe(true)
   // 同文档未引用资产：alice 上传但不引用 → get_outline_asset 拒绝
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-  const up0 = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: { data: PNG } })
+  const up0 = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
   const unref = await callTool(mcp, 'get_outline_asset', { docId: doc.docId, assetId: (await up0.json()).id })
   expect(unref.isError).toBe(true)
-  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: { data: PNG } })
-  // 跨属主已引用资产：alice 上传并在自有文档引用后，bob 的 MCP Key 仍不可取（属主+引用双校验）
+  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
+  // 跨属主已引用资产：bob 用自己的文档引用 alice 的资产 URL → 资产属主校验拒绝
   const refAsset = (await up.json())
-  await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+  const bobDoc = await api(request, server.baseUrl, bearer(other)).post('/api/docs', { title: 'bob-doc', slides: [] })
+  const bobDocId = (await bobDoc.json()).docId
+  await api(request, server.baseUrl, bearer(other)).post(`/api/docs/${bobDocId}/outline`, {})
+  const bobIns = await api(request, server.baseUrl, bearer(other)).post(`/api/docs/${bobDocId}/outline/ops`, {
     baseVersion: 1,
-    ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'xa', src: refAsset.url } }] }],
+    ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'bx', src: refAsset.url } }] }],
   })
-  const crossOwner = await callTool(mcpB, 'get_outline_asset', { docId: doc.docId, assetId: refAsset.id })
-  expect(crossOwner.isError).toBe(true)
+  if (bobIns.status() === 200) {
+    // 引用允许写入时：MCP get_outline_asset 的属主校验必须仍拒绝（非 bob 资产）
+    const crossOwner = await callTool(mcpB, 'get_outline_asset', { docId: bobDocId, assetId: refAsset.id })
+    expect(crossOwner.isError).toBe(true)
+  }
+  else {
+    // 服务端在 ops 层直接禁止引用他人资产——同样是有效边界
+    expect([400, 403]).toContain(bobIns.status())
+  }
   // 只读视图页面不带可写控件（账号仍启用时加载，验证令牌态 UI）
   await page.goto(server.docUrl(doc.docId, 'outline', 'view'))
   await page.waitForSelector('.outline-editor .ProseMirror')

@@ -16,6 +16,9 @@ import message from '@/utils/message'
 // 409 冲突时本地版本备份用的 localStorage 键前缀
 const BACKUP_KEY_PREFIX = 'PPTIST_DOC_BACKUP_'
 
+// 单例句柄：本 hook 由 App 初始化后，Header 等可复用同一状态做导航前冲刷/确认
+export const docSyncController: { current: { flushNow: () => Promise<void>, hasUnsavedChanges: () => boolean } | null } = { current: null }
+
 export default () => {
   const documentStore = useDocumentStore()
   const slidesStore = useSlidesStore()
@@ -220,8 +223,17 @@ export default () => {
     subscribe(documentStore.docId, onRemoteEvent)
   }
 
+  const flushNow = async () => {
+    scheduleSave.flush()
+    // 等本轮保存落地（maybeSave 内部异步）；失败离线由 hasUnsavedChanges/confirm 兜底
+    for (let i = 0; i < 200 && (saving || dirty); i++) await new Promise(r => setTimeout(r, 50))
+  }
+  // 暴露给非组件侧（如 Header 的 PPT→大纲导航）复用同一实例的安全过渡检查
+  docSyncController.current = { flushNow, hasUnsavedChanges }
+
   return {
     init,
     hasUnsavedChanges,
+    flushNow,
   }
 }

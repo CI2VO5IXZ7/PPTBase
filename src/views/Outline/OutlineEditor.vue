@@ -31,7 +31,9 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useOutlineStore } from '@/store/outline'
 import { EditorState, Plugin, PluginKey, type Command, type Transaction } from 'prosemirror-state'
-import { Decoration, DecorationSet, EditorView } from 'prosemirror-view'
+import { EditorView, type DecorationSet } from 'prosemirror-view'
+import { buildThreadDecorations } from '@/utils/outline/threadDeco'
+import { imageAttrsTr } from '@/utils/outline/imageOps'
 import { undo, redo, history } from 'prosemirror-history'
 import { keymap } from 'prosemirror-keymap'
 import { baseKeymap, toggleMark, setBlockType, wrapIn, chainCommands, exitCode } from 'prosemirror-commands'
@@ -61,7 +63,7 @@ const outlineStore = useOutlineStore()
 const editorRef = ref<HTMLElement>()
 const uploads = ref<{ id: string, name: string, file: File, status: 'uploading' | 'error' | 'done', error?: string }[]>([])
 const imageSel = ref<{ pos: number, blockId: string, caption: string, usage: string, usageDescription: string } | null>(null)
-const canComment = ref(false)
+const canComment = ref(true)
 const uploading = computed(() => uploads.value.some(u => u.status === 'uploading'))
 const uploadingCount = computed(() => uploads.value.filter(u => u.status !== 'done').length)
 
@@ -91,35 +93,7 @@ function ensureBlockIds(state: EditorState, tr: Transaction) {
 
 // ── 线程锚点 → decoration（跨区块 textRange 逐片段；block/image 整节点）──
 function threadDecorations(state: EditorState): DecorationSet {
-  const decos: Decoration[] = []
-  const doc = state.doc
-  const byId = new Map<string, number>()
-  doc.descendants((node, pos) => {
-    if (node.attrs.blockId) byId.set(node.attrs.blockId, pos); return true
-  })
-  for (const t of props.threads) {
-    if (t.detached) continue
-    const cls = t.status === 'resolved' ? 'thread-hl resolved' : 'thread-hl'
-    const a = t.anchor
-    if ((a.kind === 'block' || a.kind === 'image') && a.blockId) {
-      const start = a.pos !== undefined && doc.nodeAt(a.pos)?.attrs.blockId === a.blockId ? a.pos : byId.get(a.blockId)
-      if (start === undefined) continue
-      const node = doc.nodeAt(start)
-      if (node) decos.push(Decoration.node(start, start + node.nodeSize, { class: cls, 'data-thread-id': t.id }))
-    }
-    else if (a.kind === 'textRange') {
-      for (const f of a.fragments ?? []) {
-        if (f.detached) continue
-        // 片段 offset 是相对所在 textblock 内容起点的，必须经 blockId 映射回文档坐标
-        const bStart = byId.get(f.blockId)
-        if (bStart === undefined) continue
-        const from = bStart + 1 + f.from
-        const to = bStart + 1 + f.to
-        if (to > from && to <= doc.content.size + 1) decos.push(Decoration.inline(from, to, { class: cls, 'data-thread-id': t.id }))
-      }
-    }
-  }
-  return DecorationSet.create(doc, decos)
+  return buildThreadDecorations(state.doc, props.threads)
 }
 
 // ── 工具栏命令 ──
@@ -238,12 +212,12 @@ function insertImageNode(src: string, name: string, assetId = '') {
 function applyImageAttrs() {
   if (!view || !imageSel.value) return
   const { pos, caption, usage, usageDescription } = imageSel.value
-  const node = view.state.doc.nodeAt(pos)
-  if (!node || node.type.name !== 'image') {
+  const tr = imageAttrsTr(view.state, pos, { caption, usage, usageDescription })
+  if (!tr) {
     imageSel.value = null; return
   }
-  view.dispatch(view.state.tr.setNodeMarkup(pos, undefined, { ...node.attrs, caption, usage, usageDescription }))
-  imageSel.value = null
+  view.dispatch(tr)
+  // 保持面板打开：用户可连续修改多个字段，显式「完成」或图片被删时才关闭
 }
 function openImageAttrs(pos: number) {
   if (!view || props.readonly) return
@@ -314,6 +288,10 @@ onMounted(() => {
       const newState = view!.state.apply(tr)
       view!.updateState(newState)
       canComment.value = true
+      if (imageSel.value && tr.docChanged) {
+        const n = newState.doc.nodeAt(imageSel.value.pos)
+        if (!n || n.type.name !== 'image' || n.attrs.blockId !== imageSel.value.blockId) imageSel.value = null
+      }
       if (tr.docChanged) {
         // 收集全部实际 step（含 appendTransaction 补的 blockId 修正）
         for (const step of tr.steps) pendingSteps.push(step.toJSON() as Record<string, unknown>)
