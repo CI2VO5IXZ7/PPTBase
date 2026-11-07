@@ -220,7 +220,7 @@ function removeUpload(u: (typeof uploads.value)[number]) {
 }
 // 只读切换时清掉未上传占位（视图态不应挂起提交）
 watch(() => props.readonly, ro => {
-  if (ro) uploads.value = [] 
+  if (ro) uploads.value = []
 })
 function insertImageNode(src: string, name: string) {
   if (!view) return
@@ -281,7 +281,7 @@ onMounted(() => {
               for (const cand of [pos.pos, pos.inside]) {
                 const n = cand >= 0 ? view.state.doc.nodeAt(cand) : null
                 if (n?.type.name === 'image') {
-                  openImageAttrs(cand); return true 
+                  openImageAttrs(cand); return true
                 }
               }
               return false
