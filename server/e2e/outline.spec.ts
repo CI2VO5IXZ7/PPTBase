@@ -51,7 +51,7 @@ test('1. Agent 链接打开无幻灯片大纲，不陷入初始化', async ({ se
 })
 
 // ── 例2：格式/列表/中文输入(IME 事件)/粘贴/撤销重做/图片用途，保存刷新不丢 ──
-test('2. 编辑+IME+撤销重做+图片属性，保存后刷新不丢', async ({ server, page, outlinePage }) => {
+test('2. 编辑+IME+撤销重做保存后刷新不丢', async ({ server, page, outlinePage }) => {
   const doc = await server.createDoc('edit')
   await api(page.request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
@@ -212,7 +212,7 @@ test('6. 提交后编辑：轮次快照与当前稿区分', async ({ server, out
 test('7. Agent 读取素材清单与图片内容块', async ({ server, request }) => {
   const doc = await server.createDoc('assets')
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
-  // 上传资产并经 REST 插入图片块（浏览器路径例2已覆盖 UI 上传）
+  // 上传资产并经 REST 插入图片块（UI 上传路径由单独人工/browser case 覆盖）
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
   const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
   const asset = await up.json()
@@ -352,9 +352,22 @@ test('12. 权限边界', async ({ server, page, request }) => {
   const other = await startOtherUser(server)
   const foreign = await api(request, server.baseUrl, bearer(other)).get(`/api/docs/${doc.docId}/outline`)
   expect(foreign.status()).toBe(404)
-  // 跨项目素材：bob 的资产不被 alice 文档引用读取
+  // 跨项目素材：bob 的资产/文档 id 互不可见
   const foreignAsset = await mcpCall(request, server.baseUrl, other, 'get_outline_asset', { docId: doc.docId, assetId: 'whatever' })
   expect(JSON.stringify(foreignAsset.result ?? foreignAsset)).toContain('不存在或不属于')
+  // 同文档未引用资产：alice 上传但不引用 → get_outline_asset 拒绝
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
+  const unref = await mcpCall(request, server.baseUrl, server.apiKey, 'get_outline_asset', { docId: doc.docId, assetId: (await up.json()).id })
+  expect(unref.result.isError).toBe(true)
+  // 旋转链接后旧令牌失效
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/links/rotate`, {})
+  const rotated = await api(request, server.baseUrl, tok(tokens.view)).get(`/api/docs/${doc.docId}/outline`)
+  expect([401, 403, 404]).toContain(rotated.status())
+  // 禁用账号 Key：401
+  server.db.prepare('UPDATE users SET status = ? WHERE id = ?').run('disabled', server.userId)
+  const disabled = await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline`)
+  expect([401, 403]).toContain(disabled.status())
   // 只读视图页面不带可写控件
   await page.goto(server.docUrl(doc.docId, 'outline', 'view'))
   await page.waitForSelector('.outline-editor .ProseMirror')

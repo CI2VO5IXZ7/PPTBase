@@ -319,8 +319,8 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       content: z.string().min(1).describe('批注内容'),
       elId: z.string().optional().describe('关联的元素 id'),
     },
-  }, call(({ docId, slideId, content, elId }: { docId: string, slideId: string, content: string, elId?: string }) =>
-    runOps(docId, [{ op: 'addNote', slideId, content, ...(elId ? { elId } : {}) }])))
+  }, call(({ docId, slideId, content, elId, sourceApprovalId }: { docId: string, slideId: string, content: string, elId?: string, sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'addNote', slideId, content, ...(elId ? { elId } : {}) }], sourceApprovalId)))
 
   server.registerTool('reply_comment', {
     description: '回复用户在网页端留的批注（显示为 Agent 的回复）。noteId 从 list_comments 或 get_presentation 大纲里取。',
@@ -331,8 +331,8 @@ export function buildMcpServer(ctx: McpContext): McpServer {
       noteId: z.string().describe('批注 id'),
       content: z.string().min(1).describe('回复内容'),
     },
-  }, call(({ docId, slideId, noteId, content }: { docId: string, slideId: string, noteId: string, content: string }) =>
-    runOps(docId, [{ op: 'replyNote', slideId, noteId, content }])))
+  }, call(({ docId, slideId, noteId, content, sourceApprovalId }: { docId: string, slideId: string, noteId: string, content: string, sourceApprovalId?: string }) =>
+    runOps(docId, [{ op: 'replyNote', slideId, noteId, content }], sourceApprovalId)))
 
   server.registerTool('rotate_links', {
     description: '重新生成文档的编辑/只读链接，旧链接立即失效。需要给用户换新链接或吊销旧链接时用。',

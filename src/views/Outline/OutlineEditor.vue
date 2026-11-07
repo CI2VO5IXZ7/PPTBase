@@ -10,6 +10,7 @@
     <div v-for="u in uploads" :key="u.id" :class="['upload-item', u.status]">
       {{ u.name }} — {{ u.status === 'uploading' ? '上传中…' : u.status === 'error' ? `失败：${u.error}` : '完成' }}
       <button v-if="u.status === 'error'" @click="retryUpload(u)">重试</button>
+      <button v-if="u.status === 'error'" @click="removeUpload(u)">移除</button>
     </div>
     <div v-if="imageSel" class="image-attrs">
       <label>说明<input v-model="imageSel.caption" placeholder="图注" @change="applyImageAttrs" /></label>
@@ -28,15 +29,17 @@
 
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useOutlineStore } from '@/store/outline'
 import { EditorState, NodeSelection, Plugin, PluginKey, type Command, type Transaction } from 'prosemirror-state'
 import { Decoration, DecorationSet, EditorView } from 'prosemirror-view'
 import { undo, redo, history } from 'prosemirror-history'
 import { keymap } from 'prosemirror-keymap'
 import { baseKeymap, toggleMark, setBlockType, wrapIn, chainCommands, exitCode } from 'prosemirror-commands'
-import { splitListItem, liftListItem, sinkListItem } from 'prosemirror-schema-list'
+import { splitListItem, liftListItem, sinkListItem, wrapInList } from 'prosemirror-schema-list'
 import { nanoid } from 'nanoid'
 import { outlineViewSchema } from '@/utils/outline/viewSchema'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
+import { selectionToAnchorSpec } from '@/utils/outline/anchorSpec'
 import { uploadAsset } from '@/services/document'
 import { useDocumentStore } from '@/store/document'
 
@@ -54,12 +57,13 @@ const emit = defineEmits<{
 }>()
 
 const documentStore = useDocumentStore()
+const outlineStore = useOutlineStore()
 const editorRef = ref<HTMLElement>()
 const uploads = ref<{ id: string, name: string, file: File, status: 'uploading' | 'error' | 'done', error?: string }[]>([])
 const imageSel = ref<{ pos: number, blockId: string, caption: string, usage: string, usageDescription: string } | null>(null)
 const canComment = ref(false)
 const uploading = computed(() => uploads.value.some(u => u.status === 'uploading'))
-const uploadingCount = computed(() => uploads.value.filter(u => u.status === 'uploading').length)
+const uploadingCount = computed(() => uploads.value.filter(u => u.status !== 'done').length)
 
 let view: EditorView | null = null
 const pendingSteps: Record<string, unknown>[] = []
@@ -122,8 +126,8 @@ const toolbar = computed(() => [
   { label: 'H2', title: '标题2', run: cmd(setBlockType(S.nodes.heading, { level: 2 })), active: () => blockActive('heading', 2) },
   { label: 'H3', title: '标题3', run: cmd(setBlockType(S.nodes.heading, { level: 3 })), active: () => blockActive('heading', 3) },
   { label: '¶', title: '正文', run: cmd(setBlockType(S.nodes.paragraph)) },
-  { label: '•列表', title: '无序列表', run: cmd(wrapInList(S.nodes.bullet_list)) },
-  { label: '1.列表', title: '有序列表', run: cmd(wrapInList(S.nodes.ordered_list)) },
+  { label: '•列表', title: '无序列表', run: cmd(wrapList(S.nodes.bullet_list)) },
+  { label: '1.列表', title: '有序列表', run: cmd(wrapList(S.nodes.ordered_list)) },
   { label: '→缩进', title: '列表降一级', run: cmd(sinkListItem(S.nodes.list_item)) },
   { label: '←提升', title: '列表升一级', run: cmd(liftListItem(S.nodes.list_item)) },
   { label: '❝', title: '引用', run: cmd(wrapIn(S.nodes.blockquote)) },
@@ -141,15 +145,10 @@ function blockActive(name: string, level?: number) {
   const n = $from.parent
   return n.type.name === name && (level === undefined || n.attrs.level === level)
 }
-function wrapInList(type: typeof S.nodes.bullet_list): Command {
-  return (state, dispatch) => {
-    const item = S.nodes.list_item.createAndFill({ blockId: `b_${nanoid(10)}` })
-    if (!item) return false
-    const wrap = type.createAndFill({ blockId: `b_${nanoid(10)}` }, item) ?? type.create({ blockId: `b_${nanoid(10)}` }, item)
-    if (!wrap) return false
-    if (dispatch) dispatch(state.tr.replaceSelectionWith(wrap).scrollIntoView())
-    return true
-  }
+// 使用 prosemirror-schema-list 的标准 wrapInList：保留选区文本、嵌套列表正确、caret 落 list_item 内
+// 包装时给新 list/list_item 预分配 blockId（appendTransaction 再兜底补缺）
+function wrapList(type: typeof S.nodes.bullet_list): Command {
+  return wrapInList(type, { blockId: '' })
 }
 const insertHr: Command = (state, dispatch) => {
   if (dispatch) dispatch(state.tr.replaceSelectionWith(S.nodes.horizontal_rule.create({ blockId: `b_${nanoid(10)}` })).scrollIntoView())
@@ -168,36 +167,7 @@ function toggleLink() {
 // ── 选区批注：文字选区→textRange fragments（跨区块逐片段）；块级选区/光标所在块→block；图片节点→image ──
 function commentSelection() {
   if (!view) return
-  const { state } = view
-  const sel = state.selection
-  if (sel instanceof NodeSelection && sel.node.type.name === 'image' && sel.node.attrs.blockId) {
-    emit('comment-range', { kind: 'image', blockId: sel.node.attrs.blockId })
-    return
-  }
-  if (sel.empty) {
-    // 光标：批注所在顶层区块
-    const $from = sel.$from
-    for (let d = $from.depth; d >= 1; d--) {
-      const node = $from.node(d)
-      if (node.attrs.blockId) {
-        emit('comment-range', { kind: 'block', blockId: node.attrs.blockId })
-        return
-      }
-    }
-    emit('comment-range', { kind: 'document' })
-    return
-  }
-  // 逐顶层区块收集文本片段 → fragments（from/to 为文档位置）
-  const fragments: { blockId: string, from: number, to: number }[] = []
-  state.doc.nodesBetween(sel.from, sel.to, (node, pos) => {
-    if (!node.isBlock || !node.attrs.blockId) return true
-    const from = Math.max(pos, sel.from)
-    const to = Math.min(pos + node.nodeSize, sel.to)
-    if (to > from) fragments.push({ blockId: node.attrs.blockId, from, to })
-    return true
-  })
-  if (fragments.length) emit('comment-range', { kind: 'textRange', fragments })
-  else emit('comment-range', { kind: 'document' })
+  emit('comment-range', selectionToAnchorSpec(view.state.doc, view.state.selection))
 }
 
 // ── 图片：选择/粘贴/拖拽上传（≤5MB、类型白名单、逐项进度/失败重试）──
@@ -245,6 +215,13 @@ function retryUpload(u: (typeof uploads.value)[number]) {
   u.error = undefined
   void doUpload(u)
 }
+function removeUpload(u: (typeof uploads.value)[number]) {
+  uploads.value = uploads.value.filter(x => x.id !== u.id)
+}
+// 只读切换时清掉未上传占位（视图态不应挂起提交）
+watch(() => props.readonly, ro => {
+  if (ro) uploads.value = [] 
+})
 function insertImageNode(src: string, name: string) {
   if (!view) return
   const tr = view.state.tr.replaceSelectionWith(
@@ -299,7 +276,14 @@ onMounted(() => {
             },
             click: (_v, event) => {
               const pos = view?.posAtCoords({ left: event.clientX, top: event.clientY })
-              if (pos && view?.state.doc.nodeAt(pos.inside)?.type.name === 'image') openImageAttrs(pos.inside)
+              if (!pos || !view) return false
+              // atom 叶子节点：pos.pos 命中节点起点；pos.inside 只会是父容器
+              for (const cand of [pos.pos, pos.inside]) {
+                const n = cand >= 0 ? view.state.doc.nodeAt(cand) : null
+                if (n?.type.name === 'image') {
+                  openImageAttrs(cand); return true 
+                }
+              }
               return false
             },
             paste: (_v, event) => {
@@ -323,7 +307,7 @@ onMounted(() => {
     dispatchTransaction(tr) {
       const newState = view!.state.apply(tr)
       view!.updateState(newState)
-      canComment.value = !newState.selection.empty || newState.selection instanceof NodeSelection
+      canComment.value = true
       if (tr.docChanged) {
         // 收集全部实际 step（含 appendTransaction 补的 blockId 修正）
         for (const step of tr.steps) pendingSteps.push(step.toJSON() as Record<string, unknown>)
@@ -361,6 +345,8 @@ function flushNow() {
   const batch = pendingSteps.splice(0)
   if (batch.length) emit('steps', batch)
 }
+watch(uploadingCount, n => outlineStore.setUploadsPending(n), { immediate: true })
+
 defineExpose({ flushNow, pendingUploads: uploadingCount })
 </script>
 

@@ -380,7 +380,11 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
       }
       catch (err) {
         // 并发/重试撞唯一键：返回已有大纲而不是 500
-        if (body.requestId && String((err as Error).message).includes('UNIQUE')) {
+        if (String((err as Error).message).includes('UNIQUE')) {
+        const dup = db.prepare('SELECT request_hash FROM outline_revisions WHERE doc_id = ? AND request_id = ?').get(docId, body.requestId ?? '') as { request_hash: string } | undefined
+        if (body.requestId && dup && dup.request_hash !== hash) {
+          throw AppError.conflict('相同的 requestId 已用于不同内容的请求', { requestId: body.requestId })
+        }
           return { existing: true, ...get(access, docId) }
         }
         throw err

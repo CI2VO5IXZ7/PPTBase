@@ -6,6 +6,7 @@
         <span>v{{ outline.version }} / c{{ outline.contentVersion }}</span>
         <span :class="['save', outline.saveStatus]">{{ saveText }}</span>
         <span v-if="outline.lastError" class="err">{{ outline.lastError }}</span>
+        <span v-if="submittedInfo" class="pending">{{ submittedInfo }}</span>
         <span v-if="outline.status?.approval?.valid" class="approved">已确认版本 {{ outline.status.approval.contentVersion }}</span>
         <span v-else-if="outline.status?.approval" class="stale">确认已偏离，请重新确认</span>
         <span v-if="outline.status?.generation" :class="outline.status.generation.stale ? 'stale' : 'approved'">
@@ -57,7 +58,7 @@
         :submissions="outline.submissions"
         :readonly="outline.readonly"
         @op="onThreadOp"
-        @locate="() => {}"
+        @locate="onLocate"
       />
     </main>
   </div>
@@ -85,6 +86,13 @@ const suspendRefresh = ref(false)
 
 const pptUrl = computed(() => `/?doc=${documentStore.docId}#t=${documentStore.token}`)
 const draftSteps = computed(() => outline.localDraft?.steps.length ?? 0)
+// 最新一轮提交 vs 当前内容版本：区分“已提交到 cX”与“其后还有未提交修改”
+const submittedInfo = computed(() => {
+  const last = outline.submissions[0]
+  if (!last) return ''
+  const dirty = outline.contentVersion > last.contentVersion
+  return `已提交第 ${last.round} 轮（c${last.contentVersion}）${dirty ? '·其后还有未提交修改' : ''}`
+})
 const canAct = computed(() => !busy.value && !outline.readonly && !outline.uploadsPending
   && outline.saveStatus !== 'conflict' && outline.saveStatus !== 'saving')
 
@@ -115,6 +123,10 @@ const onThreadOp = async (op: Record<string, unknown>) => {
   }
 }
 
+const onLocate = () => {
+  // 点击锚点定位：暂时滚动到批注面板内高亮区（editor 侧 decoration 已标亮原文位置）
+  document.querySelector('.thread-hl')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 const onCommentRange = (anchor: OutlineAnchorSpec) => {
   const content = window.prompt('批注内容')
   if (!content) return
@@ -197,10 +209,12 @@ const copyDraft = async () => {
 
 // 导航到 PPT 前 flush 未保存内容
 const onNavPpt = async (e: Event) => {
-  if (!sync.hasUnsavedChanges()) return
   e.preventDefault()
   editorRef.value?.flushNow()
-  await sync.drain()
+  if (!(await sync.drain())) {
+    if (window.confirm('有未保存内容或保存失败，仍要离开？')) window.location.href = pptUrl.value
+    return
+  }
   window.location.href = pptUrl.value
 }
 

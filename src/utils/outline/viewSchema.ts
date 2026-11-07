@@ -35,11 +35,24 @@ const NODE_DOM: Record<string, { toDOM: NodeSpec['toDOM'], parseDOM?: NodeSpec['
     parseDOM: [{ tag: 'li', getAttrs: d => ({ blockId: (d as HTMLElement).getAttribute(BID) ?? '' }) }],
   },
   image: {
-    toDOM: n => ['figure', { [BID]: n.attrs.blockId, class: 'outline-image' },
+    toDOM: n => ['figure', { [BID]: n.attrs.blockId, class: 'outline-image', 'data-usage': n.attrs.usage, 'data-usage-desc': n.attrs.usageDescription },
       ['img', { src: n.attrs.src, alt: n.attrs.alt }],
       ['figcaption', {}, n.attrs.caption || n.attrs.usageDescription || n.attrs.usage],
     ],
-    parseDOM: [{ tag: 'figure', getAttrs: d => ({ blockId: (d as HTMLElement).getAttribute(BID) ?? '' }) }],
+    parseDOM: [{
+      tag: 'figure',
+      getAttrs: (d: HTMLElement) => {
+        const img = d.querySelector('img')
+        return {
+          blockId: d.getAttribute(BID) ?? '',
+          src: img?.getAttribute('src') ?? '',
+          alt: img?.getAttribute('alt') ?? '',
+          caption: d.querySelector('figcaption')?.textContent ?? '',
+          usage: (d.getAttribute('data-usage') as 'include' | 'reference') ?? 'reference',
+          usageDescription: d.getAttribute('data-usage-desc') ?? '',
+        }
+      },
+    }],
   },
   horizontal_rule: {
     toDOM: n => ['hr', { [BID]: n.attrs.blockId }],
