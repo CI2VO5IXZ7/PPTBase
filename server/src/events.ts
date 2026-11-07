@@ -6,13 +6,29 @@ export interface DocEvent {
   summary: string[]
 }
 
+// 大纲事件与 PPT update 事件分开：两边版本号不混用
+export interface OutlineEvent {
+  version: number
+  contentVersion: number
+  author: 'agent' | 'user'
+  summary: string[]
+}
+
 // 单进程内存订阅表：docId → 一组 SSE 响应流
 const subscribers = new Map<string, Set<ServerResponse>>()
 
 export function publish(docId: string, event: DocEvent): void {
+  emit(docId, 'update', event)
+}
+
+export function publishOutline(docId: string, event: OutlineEvent): void {
+  emit(docId, 'outline', event)
+}
+
+function emit(docId: string, name: 'update' | 'outline', event: unknown): void {
   const targets = subscribers.get(docId)
   if (!targets) return
-  const payload = `event: update\ndata: ${JSON.stringify(event)}\n\n`
+  const payload = `event: ${name}\ndata: ${JSON.stringify(event)}\n\n`
   for (const res of targets) {
     try {
       res.write(payload)

@@ -15,7 +15,10 @@ describe.skipIf(!E2E)('e2e 导出（需要无头 Chromium + 可达前端）', ()
   let docId = ''
 
   beforeAll(async () => {
-    ctx = await makeApp({ EXPORT_SYNC_WAIT_MS: '55000', RENDER_BASE_URL })
+    // 真实监听 + 前端 dist：render 浏览器以 RENDER_BASE_URL 回连同一实例读取文档
+    const distDir = join(__dirname, '../../dist')
+    ctx = await makeApp({ EXPORT_SYNC_WAIT_MS: '55000', RENDER_BASE_URL, STATIC_DIR: distDir })
+    await ctx.app.listen({ host: '127.0.0.1', port: Number(new URL(RENDER_BASE_URL).port) })
     key = createUser(ctx, 'e2e').key
     const doc = await createDoc(ctx, key, {
       title: 'e2e 导出',

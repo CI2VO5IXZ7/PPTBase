@@ -26,6 +26,7 @@ const H2_KEYS: Record<string, string> = {
   '坐标系与通用规则': 'general',
   '页面 Slide': 'slide',
   '综合示例数据': 'example',
+  '大纲协作 Outline': 'outline',
 }
 
 // 三级标题里允许单独取用的子章节

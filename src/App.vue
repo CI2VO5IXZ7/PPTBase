@@ -2,6 +2,7 @@
   <ExportRuntime v-if="isExportMode" />
   <div class="invalid-link" v-else-if="loadFailed">链接无效或已失效</div>
   <McpHome v-else-if="isMcpHome" />
+  <OutlineView v-else-if="isOutline && docId" />
   <template v-else-if="slides.length">
     <Screen v-if="screening" />
     <Viewer v-else-if="isViewMode" />
@@ -21,13 +22,14 @@ import { deleteDiscardedDB } from '@/utils/database'
 import { isPC } from '@/utils/common'
 import useDocumentSync from '@/hooks/useDocumentSync'
 
-import { isMcpHomeEntry } from '@/utils/entry'
+import { isMcpHomeEntry, isOutlineEntry } from '@/utils/entry'
 import Editor from './views/Editor/index.vue'
 import Screen from './views/Screen/index.vue'
 import Mobile from './views/Mobile/index.vue'
 import Viewer from './views/Viewer/index.vue'
 import ExportRuntime from './views/ExportRuntime/index.vue'
 import McpHome from './views/McpHome/index.vue'
+import OutlineView from './views/Outline/index.vue'
 import FullscreenSpin from '@/components/FullscreenSpin.vue'
 
 const _isPC = isPC()
@@ -50,16 +52,22 @@ const tokenMatch = window.location.hash.match(/^#t=(.*)$/)
 const isAudienceMode = mode === 'audience'
 const isExportMode = mode === 'export'
 const isMcpHome = isMcpHomeEntry(window.location.search)
+const isOutline = isOutlineEntry(window.location.search)
 const isViewMode = computed(() => mode === 'view' || role.value === 'view')
 
 const loadFailed = ref(false)
 
 const docSync = useDocumentSync()
 
-// 有 doc 时把文档令牌存进 document store，并用 replaceState 去掉地址栏 hash，避免分享截图泄露令牌
+// 有 doc 时把文档令牌存进 document store，并用 replaceState 去掉地址栏 hash，避免分享截图泄露令牌；
+// 令牌同时存 sessionStorage——否则剥离 hash 后刷新页面会掉成只读空文档
+const docTokenKey = (id: string) => 'pptist-doc-token-' + id
 if (docId) {
-  documentStore.setCredentials(docId, tokenMatch?.[1] || '')
-  if (tokenMatch) window.history.replaceState(null, '', window.location.pathname + window.location.search)
+  documentStore.setCredentials(docId, tokenMatch?.[1] || sessionStorage.getItem(docTokenKey(docId)) || '')
+  if (tokenMatch) {
+    sessionStorage.setItem(docTokenKey(docId), tokenMatch[1])
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
+  }
 }
 
 if (import.meta.env.MODE !== 'development') {
@@ -83,12 +91,14 @@ onMounted(async () => {
     // 无头导出页：由 ExportRuntime 自挂 window.__PPTIST_EXPORT__，等待服务端 load()
   }
   else if (docId) {
-    try {
-      await docSync.init()
-    }
-    catch {
-      loadFailed.value = true
-      return
+    if (!isOutline) {
+      try {
+        await docSync.init()
+      }
+      catch {
+        loadFailed.value = true
+        return
+      }
     }
     await deleteDiscardedDB()
     snapshotStore.initSnapshotDatabase()

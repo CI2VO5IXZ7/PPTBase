@@ -6,6 +6,7 @@
           <div class="main-menu">
             <PopoverMenuItem class="popover-menu-item" @click="setDialogForExport('pptx')"><i-icon-park-outline:download class="icon" /> 导出文件</PopoverMenuItem>
             <PopoverMenuItem class="popover-menu-item" v-if="viewUrl" @click="copyViewLink()"><i-icon-park-outline:link class="icon" /> 复制只读链接</PopoverMenuItem>
+            <PopoverMenuItem class="popover-menu-item" v-if="hasOutline && outlineUrl" @click="openOutline()"><i-icon-park-outline:edit-two class="icon" /> 编辑大纲</PopoverMenuItem>
             <Divider :margin="10" />
             <PopoverMenuItem class="popover-menu-item" @click="mainMenuVisible = false; hotkeyDrawerVisible = true"><i-icon-park-outline:command class="icon" /> 快捷操作</PopoverMenuItem>
           </div>
@@ -66,7 +67,9 @@ import { computed, nextTick, ref, useTemplateRef, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMainStore, useSlidesStore, useDocumentStore } from '@/store'
 import useScreening from '@/hooks/useScreening'
+import { docSyncController } from '@/hooks/useDocumentSync'
 import message from '@/utils/message'
+
 import type { DialogForExportTypes } from '@/types/export'
 
 import HotkeyDoc from './HotkeyDoc.vue'
@@ -80,7 +83,7 @@ const mainStore = useMainStore()
 const slidesStore = useSlidesStore()
 const documentStore = useDocumentStore()
 const { title } = storeToRefs(slidesStore)
-const { docId, viewUrl, saveStatus, lastRemoteSummary } = storeToRefs(documentStore)
+const { docId, viewUrl, saveStatus, lastRemoteSummary, hasOutline, outlineUrl } = storeToRefs(documentStore)
 const { enterScreening, enterScreeningFromStart } = useScreening()
 
 const mainMenuVisible = ref(false)
@@ -113,6 +116,19 @@ watch(lastRemoteSummary, summary => {
   if (!summary.length) return
   message.info(summary.slice(0, 3).join('；'), { title: 'Agent 更新了文档' })
 })
+
+const openOutline = async () => {
+  mainMenuVisible.value = false
+  if (!outlineUrl.value) return
+  // 先冲刷 1.5s debounce 里的未保存 PPT 修改；失败/离线时确认后才离开
+  const sync = docSyncController.current
+  if (sync?.hasUnsavedChanges()) {
+    await sync.flushNow()
+    if (sync.hasUnsavedChanges()
+      && !window.confirm('PPT 修改尚未保存成功（离线/冲突），现在离开可能丢失。仍要进入大纲？')) return
+  }
+  window.location.href = outlineUrl.value
+}
 
 const copyViewLink = async () => {
   try {

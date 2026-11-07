@@ -780,3 +780,21 @@ filter: brightness(108%) contrast(105%) blur(2px) opacity(92%);
   ]
 }
 ```
+
+## 大纲协作 Outline
+
+制作前大纲是受限 ProseMirror JSON（非 PPT 页面数据）。区块类型：`paragraph`、`heading(level 1-3)`、`bullet_list`/`ordered_list`/`list_item`（可嵌套）、`blockquote`、`horizontal_rule`、`image(src/alt/caption/usage/usageDescription)`、`hard_break`；内联标记 `strong`、`em`、`link(href/title)`。每个区块有稳定 `attrs.blockId`。
+
+批注锚点 `anchor` 四选一：`{kind:"document"}`、`{kind:"block",blockId}`、`{kind:"image",blockId}`、`{kind:"textRange",fragments:[{blockId,from,to}]}`（fragments 1–20 项，每项为某区块内一段文本选区，from/to 为该区块文本内容内偏移，不含边界 token）。存储态锚点由服务端补全：textRange 每个片段另存 `fromOffset`/`toOffset`/`text`/`detached?`；锚点级另有 `quote:{before,text,after}` 引用原文与 `createdContentVersion`；block/image 锚点另存当前 `pos`。片段或区块被删后转 `detached`，线程保留原引用文本。
+
+大纲操作（`edit_outline` 的 `ops` 每项）：
+- `{op:"insertBlocks", before?|after?, blocks:[...]}`（不带定位 = 追加）
+- `{op:"replaceBlock", blockId, block:{...}}`
+- `{op:"updateBlockAttrs", blockId, attrs:{...}}`（仅允许白名单属性：level/src/alt/caption/usage/usageDescription/order）
+- `{op:"deleteBlocks", blockIds:[...]}`（拒绝重复 id 与祖先+后代同批）
+- `{op:"moveBlock", blockId, before?|after?}`
+- `{op:"addComment", anchor, content}`、`{op:"replyComment", threadId, content}`、`{op:"setThreadStatus", threadId, status:"open"|"resolved"}`
+
+`get_outline` 返回 `content`（完整 JSON）与 `readable.lines`（每行带 blockId 前缀，分页 `hasMore`/`nextCursor`）。`source` 参数读不可变快照：`{type:"submission",id}` 或 `{type:"approval",id}`。
+
+确认后正文/图片/用途变化会使旧 `sourceApprovalId` 失效：写页面工具会返回 `production_source_required`，需用户重新确认并再次 `begin_presentation_from_outline`。批注不影响确认。

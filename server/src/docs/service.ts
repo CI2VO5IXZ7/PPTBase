@@ -39,9 +39,13 @@ export interface CommitResult {
 export interface DocServiceDeps {
   db: Db
   config: AppConfig
+  // 大纲占用的受控存储字节（当前正文/线程＋保留快照），无大纲时为 0
+  outlineBytes?: (docId: string) => number
+  // 制作门禁：有大纲的文档要求 Agent 发起的写页面请求携带有效确认来源
+  outlineGate?: (docId: string, sourceApprovalId: string | undefined) => void
 }
 
-export function createDocService({ db, config }: DocServiceDeps) {
+export function createDocService({ db, config, outlineBytes, outlineGate }: DocServiceDeps) {
   const getUserStmt = () => db.prepare('SELECT * FROM users WHERE id = ?')
 
   function mustGetDoc(docId: string): DocumentRow {
@@ -93,8 +97,10 @@ export function createDocService({ db, config }: DocServiceDeps) {
     const quota = ownerQuota(row.owner_id)
     const json = JSON.stringify(data)
     const size = Buffer.byteLength(json)
-    if (size > quota.docBytes) {
-      throw AppError.docTooLarge(`文档超过大小限制（${Math.round(quota.docBytes / 1024 / 1024)}MB）`)
+    // 受控合计：PPT 正文与大纲（含保留快照）共用同一大小预算
+    const outlineExtra = outlineBytes?.(docId) ?? 0
+    if (size + outlineExtra > quota.docBytes) {
+      throw AppError.docTooLarge(`文档与大纲合计超过大小限制（${Math.round(quota.docBytes / 1024 / 1024)}MB）`)
     }
 
     const prev = JSON.parse(row.data) as DocData
@@ -173,13 +179,34 @@ export function createDocService({ db, config }: DocServiceDeps) {
 
     listDocs(ownerId: string) {
       const rows = db.prepare(
-        'SELECT id, title, version, data, updated_at FROM documents WHERE owner_id = ? ORDER BY updated_at DESC'
-      ).all(ownerId) as { id: string, title: string, version: number, data: string, updated_at: number }[]
+        `SELECT d.id, d.title, d.version, d.data, d.updated_at,
+           o.version AS outline_version, o.content_version AS outline_content_version,
+           a.content_version AS approval_content_version,
+           (SELECT COUNT(*) FROM outline_submissions s WHERE s.doc_id = d.id AND s.status = 'pending') AS outline_pending
+         FROM documents d
+         LEFT JOIN outlines o ON o.doc_id = d.id
+         LEFT JOIN outline_approvals a ON a.id = o.active_approval_id AND a.status = 'active'
+         WHERE d.owner_id = ? ORDER BY d.updated_at DESC`
+      ).all(ownerId) as {
+        id: string, title: string, version: number, data: string, updated_at: number,
+        outline_version: number | null, outline_content_version: number | null,
+        approval_content_version: number | null, outline_pending: number,
+      }[]
       return rows.map(row => ({
         id: row.id,
         title: row.title,
         version: row.version,
         slideCount: (JSON.parse(row.data) as DocData).slides.length,
+        hasOutline: row.outline_version !== null,
+        ...(row.outline_version !== null ? {
+          outline: {
+            version: row.outline_version,
+            contentVersion: row.outline_content_version,
+            pendingSubmissions: row.outline_pending,
+            approvalActive: row.approval_content_version !== null,
+            approvalValid: row.approval_content_version !== null && row.approval_content_version === row.outline_content_version,
+          },
+        } : {}),
         updatedAt: row.updated_at,
       }))
     },
@@ -188,13 +215,19 @@ export function createDocService({ db, config }: DocServiceDeps) {
       mustGetDoc(docId)
       const write = db.transaction(() => {
         db.prepare('DELETE FROM revisions WHERE doc_id = ?').run(docId)
+        // outline_revisions 与 revisions 一样无外键，手动清理；
+        // outlines/submissions/approvals 由外键级联删除
+        db.prepare('DELETE FROM outline_revisions WHERE doc_id = ?').run(docId)
         db.prepare('DELETE FROM documents WHERE id = ?').run(docId)
       })
       write()
     },
 
-    // 网页端自动保存：baseVersion == 当前版本直接写；落后则三方合并
-    putDoc(access: DocAccess, docId: string, baseVersion: number, input: unknown) {
+    // 网页端自动保存：baseVersion == 当前版本直接写；落后则三方合并。
+    // 制作门禁只拦 Agent 发起的写页面请求（API Key，author=agent）；
+    // 编辑令牌的网页手动编辑（author=user）不受限，记为用户变更
+    putDoc(access: DocAccess, docId: string, baseVersion: number, input: unknown, sourceApprovalId?: string) {
+      if (access.author === 'agent') outlineGate?.(docId, sourceApprovalId)
       const row = mustGetDoc(docId)
       const { data: theirs, normalized } = prepare(input, row.owner_id)
 
@@ -219,7 +252,8 @@ export function createDocService({ db, config }: DocServiceDeps) {
     },
 
     // Agent 原子操作：传了 baseVersion 但和当前版本不一致 → 409
-    applyAgentOps(access: DocAccess, docId: string, ops: Op[], baseVersion?: number) {
+    applyAgentOps(access: DocAccess, docId: string, ops: Op[], baseVersion?: number, sourceApprovalId?: string) {
+      outlineGate?.(docId, sourceApprovalId)
       const row = mustGetDoc(docId)
       if (baseVersion !== undefined && baseVersion !== row.version) {
         throw AppError.conflict(`baseVersion=${baseVersion} 与当前版本 ${row.version} 不一致，请先拉取最新文档`, { currentVersion: row.version })
@@ -231,7 +265,8 @@ export function createDocService({ db, config }: DocServiceDeps) {
     },
 
     // RFC6902 patch：baseVersion 必须等于当前版本
-    applyJsonPatch(access: DocAccess, docId: string, baseVersion: number, patch: unknown[]) {
+    applyJsonPatch(access: DocAccess, docId: string, baseVersion: number, patch: unknown[], sourceApprovalId?: string) {
+      outlineGate?.(docId, sourceApprovalId)
       const row = mustGetDoc(docId)
       if (baseVersion !== row.version) {
         throw AppError.conflict(`baseVersion=${baseVersion} 与当前版本 ${row.version} 不一致`, { currentVersion: row.version })

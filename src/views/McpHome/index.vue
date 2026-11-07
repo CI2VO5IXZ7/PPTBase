@@ -23,12 +23,22 @@
     headers:
       Authorization: Bearer pk_...</pre>
 
+      <h2>大纲协作（新）</h2>
+      <p>
+        Agent 生成页面前，先与用户共建一份自由文档大纲：用户网页批注、提交反馈、确认后 Agent 才动页面。
+        提交/确认不会自动唤醒 Agent——用户在对话中继续找你才处理；确认固定内容版本，正文或图片变化后旧制作来源失效。
+      </p>
+      <p>
+        链接示例：编辑 <code>?doc=DOC_ID&amp;tab=outline#t=编辑令牌</code>；只读 <code>?doc=DOC_ID&amp;tab=outline&amp;mode=view#t=只读令牌</code>（令牌只经 URL hash 传递）。
+      </p>
+
       <h2>推荐工作流</h2>
       <ol>
-        <li><code>get_authoring_guide</code> 获取页面数据编写规范</li>
+        <li><code>get_authoring_guide</code> 获取页面数据编写规范（含 outline 章节）</li>
         <li><code>create_presentation</code> 创建文档</li>
         <li>把返回的 <code>editUrl</code> 发给用户（网页端可直接编辑，<code>viewUrl</code> 为只读）</li>
         <li><code>get_changes</code> 查看用户在网页端的修改</li>
+        <li>（推荐大纲流程）<code>create_outline</code> 建大纲（返回 <code>outlineEditUrl</code>/<code>outlineViewUrl</code> 发给用户）→ 用户网页编辑批注后点「提交反馈」→ <code>get_outline_feedback</code> 按轮次读快照 → <code>edit_outline</code> 改稿 → <code>complete_outline_feedback</code> 标记该轮完成 → 用户点「确认大纲」后 <code>begin_presentation_from_outline</code> 取制作来源，后续写页面工具一律带 <code>sourceApprovalId</code></li>
         <li><code>export_presentation</code> 导出为 pptx / pdf / png / json</li>
       </ol>
 
@@ -37,10 +47,12 @@
         <tbody>
           <tr><td>指南</td><td><code>get_authoring_guide</code></td></tr>
           <tr><td>文档</td><td><code>create_presentation</code> <code>list_presentations</code> <code>get_presentation</code> <code>get_slide</code> <code>delete_presentation</code> <code>rotate_links</code></td></tr>
+          <tr><td>大纲</td><td><code>create_outline</code> <code>get_outline</code> <code>edit_outline</code> <code>get_outline_feedback</code> <code>complete_outline_feedback</code> <code>begin_presentation_from_outline</code> <code>get_outline_asset</code></td></tr>
           <tr><td>编辑</td><td><code>add_slides</code> <code>update_slide</code> <code>delete_slides</code> <code>move_slide</code> <code>add_elements</code> <code>update_elements</code> <code>delete_elements</code> <code>batch_edit</code> <code>set_theme</code></td></tr>
           <tr><td>协作</td><td><code>get_changes</code> <code>list_comments</code> <code>add_comment</code> <code>reply_comment</code></td></tr>
           <tr><td>素材</td><td><code>upload_image</code>（外链或 base64 转存，返回可写入 <code>image.src</code> 的地址）</td></tr>
           <tr><td>导出</td><td><code>render_slide</code> <code>export_presentation</code> <code>get_export</code></td></tr>
+          <tr><td colspan="2" class="notes">大纲要点：提交反馈/确认不会唤醒 Agent，用户在对话中继续找你才处理；确认稿固定 contentVersion，正文/图片变化后旧来源失效需重新确认；批注不影响确认；大纲图片为 <code>/assets/</code> 不可猜测地址，仅被引用的本人资产可读。</td></tr>
         </tbody>
       </table>
 

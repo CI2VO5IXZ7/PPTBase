@@ -2,6 +2,7 @@
   <div class="pptist-viewer">
     <div class="viewer-header">
       <div class="title" :title="title">{{ title }}</div>
+      <a v-if="hasOutline && docId && token" class="outline-link" :href="outlineViewLink">查看大纲</a>
       <Button class="screening-btn" type="primary" @click="enterScreeningFromStart()">
         <i-icon-park-outline:ppt class="icon" /> 放映
       </Button>
@@ -17,9 +18,10 @@
 </template>
 
 <script lang="ts" setup>
-import { onMounted, onUnmounted, ref, useTemplateRef } from 'vue'
+import { computed, onMounted, onUnmounted, ref, useTemplateRef } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useSlidesStore } from '@/store'
+import { useDocumentStore } from '@/store/document'
 import useScreening from '@/hooks/useScreening'
 
 import ThumbnailSlide from '@/views/components/ThumbnailSlide/index.vue'
@@ -27,6 +29,9 @@ import Button from '@/components/Button.vue'
 import SourceAttribution from '@/components/SourceAttribution.vue'
 
 const { title, slides } = storeToRefs(useSlidesStore())
+const { hasOutline, docId, token } = storeToRefs(useDocumentStore())
+// 只读令牌打开只读大纲页签；不升级任何权限
+const outlineViewLink = computed(() => `/?doc=${docId.value}&tab=outline&mode=view#t=${token.value}`)
 const { enterScreeningFromStart } = useScreening()
 
 const bodyRef = useTemplateRef<HTMLElement>('bodyRef')

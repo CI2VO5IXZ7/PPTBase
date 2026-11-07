@@ -84,8 +84,92 @@ export interface ExportJobRow {
   finished_at: number | null
 }
 
+export interface OutlineRow {
+  doc_id: string
+  content: string
+  threads: string
+  version: number
+  content_version: number
+  size: number
+  active_approval_id: string | null
+  gen_approval_id: string | null
+  gen_content_version: number | null
+  gen_ppt_version: number | null
+  gen_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+export interface OutlineRevisionRow {
+  doc_id: string
+  version: number
+  content_version: number
+  author: string
+  key_id: string | null
+  summary: string
+  snapshot: Buffer | null
+  request_id: string | null
+  request_hash: string | null
+  created_at: number
+}
+
+export type OutlineSubmissionStatus = 'pending' | 'handled' | 'superseded'
+
+export interface OutlineSubmissionRow {
+  id: string
+  doc_id: string
+  round: number
+  version: number
+  content_version: number
+  snapshot: Buffer
+  status: OutlineSubmissionStatus
+  note: string | null
+  result: string | null
+  request_id: string | null
+  request_hash: string | null
+  created_at: number
+  handled_at: number | null
+}
+
+export type OutlineConfirmAction = 'approve' | 'revoke'
+
+export interface OutlineConfirmSessionRow {
+  id: string
+  doc_id: string
+  token_hash: string
+  expires_at: number
+  created_at: number
+}
+
+export interface OutlineConfirmTicketRow {
+  id: string
+  doc_id: string
+  action: OutlineConfirmAction
+  token_hash: string
+  expires_at: number
+  used_at: number | null
+  created_at: number
+}
+
+export type OutlineApprovalStatus = 'active' | 'revoked' | 'superseded'
+
+export interface OutlineApprovalRow {
+  id: string
+  doc_id: string
+  version: number
+  content_version: number
+  snapshot: Buffer
+  status: OutlineApprovalStatus
+  open_threads: number
+  acknowledged_open_threads: number
+  request_id: string | null
+  request_hash: string | null
+  created_at: number
+  revoked_at: number | null
+}
+
 // user_version 顺序迁移；新增表结构时追加下一段并把版本号 +1
-const MIGRATIONS: string[] = [
+export const MIGRATIONS: string[] = [
   // v1：多用户、Key、文档、修订、资产
   `
   CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, note TEXT,
@@ -125,6 +209,61 @@ const MIGRATIONS: string[] = [
     last_seen_at INTEGER, ip TEXT, user_agent TEXT);
   CREATE INDEX admin_sessions_expiry ON admin_sessions(expires_at);
   CREATE TABLE admin_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+  `,
+  // v4：制作前大纲——正文/线程、顺序修订、反馈提交快照、确认快照、制作来源
+  // version 是大纲总体并发版本；content_version 只在正文/图片/用途变化时递增
+  `
+  CREATE TABLE outlines (doc_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+    content TEXT NOT NULL, threads TEXT NOT NULL,
+    version INTEGER NOT NULL, content_version INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    active_approval_id TEXT,
+    gen_approval_id TEXT, gen_content_version INTEGER, gen_ppt_version INTEGER, gen_at INTEGER,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+  CREATE TABLE outline_revisions (doc_id TEXT NOT NULL, version INTEGER NOT NULL,
+    content_version INTEGER NOT NULL,
+    author TEXT NOT NULL, key_id TEXT, summary TEXT NOT NULL,
+    snapshot BLOB, request_id TEXT, request_hash TEXT,
+    created_at INTEGER NOT NULL, PRIMARY KEY (doc_id, version));
+  CREATE UNIQUE INDEX outline_revisions_request ON outline_revisions(doc_id, request_id)
+    WHERE request_id IS NOT NULL;
+  CREATE TABLE outline_submissions (id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    round INTEGER NOT NULL, version INTEGER NOT NULL, content_version INTEGER NOT NULL,
+    snapshot BLOB NOT NULL, status TEXT NOT NULL, note TEXT, result TEXT,
+    request_id TEXT, request_hash TEXT,
+    created_at INTEGER NOT NULL, handled_at INTEGER);
+  CREATE UNIQUE INDEX outline_submissions_request ON outline_submissions(doc_id, request_id)
+    WHERE request_id IS NOT NULL;
+  CREATE INDEX outline_submissions_doc ON outline_submissions(doc_id, round);
+  CREATE TABLE outline_approvals (id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    version INTEGER NOT NULL, content_version INTEGER NOT NULL,
+    snapshot BLOB NOT NULL, status TEXT NOT NULL,
+    open_threads INTEGER NOT NULL DEFAULT 0, acknowledged_open_threads INTEGER NOT NULL DEFAULT 0,
+    request_id TEXT, request_hash TEXT,
+    created_at INTEGER NOT NULL, revoked_at INTEGER);
+  CREATE UNIQUE INDEX outline_approvals_request ON outline_approvals(doc_id, request_id)
+    WHERE request_id IS NOT NULL;
+  CREATE INDEX outline_approvals_doc ON outline_approvals(doc_id, created_at);
+  `,
+  // v5：一次性大纲确认凭证——编辑令牌只能读/写大纲内容，
+  // 确认/撤销必须另持服务端下发、绑定动作、限时且用完即废的凭证
+  `
+  CREATE TABLE outline_confirm_tickets (id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    action TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+    expires_at INTEGER NOT NULL, used_at INTEGER, created_at INTEGER NOT NULL);
+  CREATE INDEX outline_confirm_tickets_expiry ON outline_confirm_tickets(expires_at);
+  `,
+  // v6：网页确认会话——领确认票与编辑令牌脱钩：会话只签发给同源
+  // 浏览器页面（路由层校验 Origin），领票必须另持有效会话
+  `
+  CREATE TABLE outline_confirm_sessions (id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    token_hash TEXT UNIQUE NOT NULL,
+    expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+  CREATE INDEX outline_confirm_sessions_expiry ON outline_confirm_sessions(expires_at);
   `,
 ]
 

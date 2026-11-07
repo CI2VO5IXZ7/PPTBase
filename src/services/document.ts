@@ -8,7 +8,27 @@ export interface DocData {
   slides: Slide[]
 }
 
+// GET /api/docs/:id 下发的大纲状态；generation 为当前制作来源（stale=true 表示已失效）
+export interface DocOutlineStatus {
+  version: number
+  contentVersion: number
+  pendingSubmissions: number
+  approvalActive: boolean
+  approvalValid: boolean
+  generation: {
+    approvalId: string
+    contentVersion: number
+    pptVersion: number
+    at: number
+    stale: boolean
+  } | null
+}
+
 export interface DocResponse extends DocData {
+  hasOutline?: boolean
+  outline?: DocOutlineStatus
+  outlineEditUrl?: string
+  outlineViewUrl?: string
   id: string
   version: number
   role: 'owner' | 'edit' | 'view'
@@ -38,13 +58,15 @@ export class DocRequestError extends Error {
   code: string
   currentVersion?: number
   conflicts?: string[]
+  issues?: Record<string, unknown>
 
-  constructor(status: number, message: string, code = '', currentVersion?: number, conflicts?: string[]) {
+  constructor(status: number, message: string, code = '', currentVersion?: number, conflicts?: string[], issues?: Record<string, unknown>) {
     super(message)
     this.status = status
     this.code = code
     this.currentVersion = currentVersion
     this.conflicts = conflicts
+    this.issues = issues
   }
 }
 
@@ -76,6 +98,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       body?.error || '',
       issues?.currentVersion,
       Array.isArray(issues?.conflicts) ? issues.conflicts : undefined,
+      (body?.issues ?? undefined) as Record<string, unknown> | undefined,
     )
   }
   return body as T
@@ -83,11 +106,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 export const getDoc = (id: string) => request<DocResponse>(`/api/docs/${id}`)
 
-export const putDoc = (id: string, baseVersion: number, doc: DocData) =>
+// 大纲等服务复用同一凭证/错误处理的请求入口
+export const docRequest = request
+
+// 制作门禁只拦 Agent 发起的改页；网页手动编辑不受限，有当前来源时顺带携带 sourceApprovalId
+export const putDoc = (id: string, baseVersion: number, doc: DocData, sourceApprovalId?: string) =>
   request<PutDocResult>(`/api/docs/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ baseVersion, doc }),
+    body: JSON.stringify({ baseVersion, doc, ...(sourceApprovalId ? { sourceApprovalId } : {}) }),
   })
 
 export const uploadAsset = async (id: string, file: File) => {
@@ -108,7 +135,14 @@ export const uploadAsset = async (id: string, file: File) => {
 const RETRY_DELAYS = [1000, 2000, 5000, 10000, 20000, 30000]
 
 // EventSource 不支持自定义请求头，用 fetch 流式读取并手动解析 SSE
-export function subscribe(id: string, onUpdate: (event: DocEvent) => void): () => void {
+export interface OutlineEvent {
+  version: number
+  contentVersion: number
+  author: 'agent' | 'user'
+  summary: string[]
+}
+
+export function subscribe(id: string, onUpdate: (event: DocEvent) => void, onOutline?: (event: OutlineEvent) => void, onReconnect?: () => void): () => void {
   let closed = false
   let retries = 0
   let abort: AbortController | null = null
@@ -128,6 +162,12 @@ export function subscribe(id: string, onUpdate: (event: DocEvent) => void): () =
       }
       catch { /* 忽略无法解析的事件 */ }
     }
+    else if (name === 'outline' && onOutline && dataLines.length) {
+      try {
+        onOutline(JSON.parse(dataLines.join('\n')))
+      }
+      catch { /* 忽略无法解析的事件 */ }
+    }
   }
 
   const connect = async () => {
@@ -138,6 +178,8 @@ export function subscribe(id: string, onUpdate: (event: DocEvent) => void): () =
         headers: { 'X-Doc-Token': docToken },
         signal: abort.signal,
       })
+      // 断线后首次成功重连：由调用方独立 GET 补拉（不把 SSE 当可靠事件队列）
+      if (res.ok && retries > 0) onReconnect?.()
       if (!res.ok || !res.body) throw new Error(`events ${res.status}`)
       retries = 0
 

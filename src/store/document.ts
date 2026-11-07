@@ -10,6 +10,7 @@ export interface DocumentState {
   version: number
   saveStatus: SaveStatus
   viewUrl: string
+  hasOutline: boolean
   lastRemoteSummary: string[]
 }
 
@@ -21,12 +22,19 @@ export const useDocumentStore = defineStore('document', {
     version: 0,
     saveStatus: 'saved',
     viewUrl: '',
+    hasOutline: false,
     lastRemoteSummary: [],
   }),
 
   getters: {
     readonly(state) {
       return state.role === 'view'
+    },
+    // 大纲页签链接按当前凭证即时构造；令牌只在内存，不落存储
+    outlineUrl(state) {
+      if (!state.docId || !state.hasOutline) return ''
+      const mode = state.role === 'view' ? '&mode=view' : ''
+      return `/?doc=${state.docId}&tab=outline${mode}#t=${state.token}`
     },
   },
 
@@ -46,6 +54,9 @@ export const useDocumentStore = defineStore('document', {
     },
     setViewUrl(viewUrl: string) {
       this.viewUrl = viewUrl
+    },
+    setHasOutline(hasOutline: boolean) {
+      this.hasOutline = hasOutline
     },
     setLastRemoteSummary(summary: string[]) {
       this.lastRemoteSummary = summary

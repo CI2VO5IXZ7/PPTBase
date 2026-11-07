@@ -10,11 +10,16 @@ import {
   subscribe,
   type DocData,
   type DocEvent,
+  type DocResponse,
+  type PutDocResult,
 } from '@/services/document'
 import message from '@/utils/message'
 
 // 409 冲突时本地版本备份用的 localStorage 键前缀
 const BACKUP_KEY_PREFIX = 'PPTIST_DOC_BACKUP_'
+
+// 单例句柄：本 hook 由 App 初始化后，Header 等可复用同一状态做导航前冲刷/确认
+export const docSyncController: { current: { flushNow: () => Promise<void>, hasUnsavedChanges: () => boolean } | null } = { current: null }
 
 export default () => {
   const documentStore = useDocumentStore()
@@ -23,6 +28,8 @@ export default () => {
   const mainStore = useMainStore()
 
   let initialized = false
+  // 在途初始化 Promise：并发 init 共享同一次结果，避免重复拉取/订阅
+  let initPromise: Promise<void> | null = null
   let lastSyncedJSON = ''
   let applyingRemote = false
   let dirty = false
@@ -30,6 +37,18 @@ export default () => {
   let saveQueued = false
   let pendingRemote: DocEvent | null = null
   let pendingTimer: ReturnType<typeof setTimeout> | null = null
+  // 制作来源：自动保存随 PUT 顺带携带当前有效 approvalId；未 begin/已失效时为 undefined。
+  // 真人网页编辑不受门禁限制，该值仅供 Agent 路径的门禁使用
+  let sourceApprovalId: string | undefined
+  // 门禁拒绝提示节流：每次连续被拒只提示一次，恢复保存后复位
+  let gateBlocked = false
+
+  // 每次拿到文档状态都同步制作来源：Agent begin/大纲内容变化都会改变它
+  const syncProductionSource = (remote: DocResponse) => {
+    documentStore.setHasOutline(!!remote.hasOutline)
+    const generation = remote.outline?.generation ?? null
+    sourceApprovalId = generation && !generation.stale ? generation.approvalId : undefined
+  }
 
   const serializeDoc = (): DocData => ({
     title: slidesStore.title,
@@ -47,10 +66,12 @@ export default () => {
     return !!el.closest('.ProseMirror') || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA'
   }
 
-  const hasUnsavedChanges = () => dirty || saving
+  // 409 冲突后本地修改只备份未落库：conflict 计入未保存，导航/关闭前必须提示确认
+  const hasUnsavedChanges = () => dirty || saving || documentStore.saveStatus === 'conflict'
 
   // 用服务端文档覆盖本地状态（保持当前页、清理失效选中），应用期间置 applyingRemote 避免触发自动保存
-  const applyRemoteDoc = async (doc: DocData & { version: number }) => {
+  const applyRemoteDoc = async (doc: DocResponse) => {
+    syncProductionSource(doc)
     applyingRemote = true
     const currentSlideId = slidesStore.currentSlide?.id
     const oldIndex = slidesStore.slideIndex
@@ -98,7 +119,20 @@ export default () => {
     saving = true
     documentStore.setSaveStatus('saving')
     try {
-      const result = await putDoc(documentStore.docId, documentStore.version, JSON.parse(json))
+      let result: PutDocResult
+      try {
+        result = await putDoc(documentStore.docId, documentStore.version, JSON.parse(json), sourceApprovalId)
+      }
+      catch (e) {
+        // 制作门禁拒绝：来源可能已由 Agent begin/更新，拉一次最新状态换来源重试；
+        // 仍无有效来源则抛回外层按门禁拒绝处理（本地改动保留为未保存）
+        if (!(e instanceof DocRequestError) || e.status !== 409 || e.issues?.code !== 'production_source_required') throw e
+        const previous = sourceApprovalId
+        syncProductionSource(await getDoc(documentStore.docId))
+        if (!sourceApprovalId || sourceApprovalId === previous) throw e
+        result = await putDoc(documentStore.docId, documentStore.version, JSON.parse(json), sourceApprovalId)
+      }
+      gateBlocked = false
       documentStore.setVersion(result.version)
       lastSyncedJSON = json
       if ((result.merged || result.normalized) && !dirty) {
@@ -110,10 +144,20 @@ export default () => {
     }
     catch (e) {
       if (e instanceof DocRequestError && e.status === 409) {
-        localStorage.setItem(`${BACKUP_KEY_PREFIX}${documentStore.docId}`, json)
-        await applyRemoteDoc(await getDoc(documentStore.docId))
-        documentStore.setSaveStatus('conflict')
-        message.warning('与 Agent 的修改冲突，已载入最新版本')
+        if (e.issues?.code === 'production_source_required') {
+          // 门禁拒绝不是版本冲突：不能用远端覆盖本地改动；保持未保存并提示下一步
+          documentStore.setSaveStatus('dirty')
+          if (!gateBlocked) {
+            gateBlocked = true
+            message.warning('该文档已绑定大纲：页面修改需等待有效的制作来源（大纲确认且 Agent 已开始制作），本次改动暂未保存')
+          }
+        }
+        else {
+          localStorage.setItem(`${BACKUP_KEY_PREFIX}${documentStore.docId}`, json)
+          await applyRemoteDoc(await getDoc(documentStore.docId))
+          documentStore.setSaveStatus('conflict')
+          message.warning('与 Agent 的修改冲突，已载入最新版本')
+        }
       }
       else if (e instanceof DocRequestError && e.status < 500 && e.status !== 429) {
         // 服务端明确拒绝（如令牌失效、文档过大），不再自动重试
@@ -186,16 +230,21 @@ export default () => {
   }
 
   // 有 doc 的页面打开时调用一次：getDoc 初始化 slidesStore，然后挂上自动保存与 SSE
-  const init = async () => {
-    if (initialized) return
-    initialized = true
+  // 只有全部成功才置 initialized；首次拉取失败不置位，下次 init 可干净重试
+  const init = () => {
+    if (initialized) return Promise.resolve()
+    initPromise ??= doInit().finally(() => { initPromise = null })
+    return initPromise
+  }
 
+  const doInit = async () => {
     setDocToken(documentStore.token)
     const remote = await getDoc(documentStore.docId)
 
     documentStore.setRole(remote.role)
     documentStore.setVersion(remote.version)
     if (remote.viewUrl) documentStore.setViewUrl(remote.viewUrl)
+    syncProductionSource(remote)
 
     applyingRemote = true
     slidesStore.setTitle(remote.title)
@@ -217,10 +266,20 @@ export default () => {
       })
     }
     subscribe(documentStore.docId, onRemoteEvent)
+    initialized = true
   }
+
+  const flushNow = async () => {
+    scheduleSave.flush()
+    // 等本轮保存落地（maybeSave 内部异步）；失败离线由 hasUnsavedChanges/confirm 兜底
+    for (let i = 0; i < 200 && (saving || dirty); i++) await new Promise(r => setTimeout(r, 50))
+  }
+  // 暴露给非组件侧（如 Header 的 PPT→大纲导航）复用同一实例的安全过渡检查
+  docSyncController.current = { flushNow, hasUnsavedChanges }
 
   return {
     init,
     hasUnsavedChanges,
+    flushNow,
   }
 }
