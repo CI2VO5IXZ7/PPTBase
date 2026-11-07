@@ -2,7 +2,7 @@
 // 同时把追加事务的 steps 导出给同步队列——否则客户端 blockId 与服务端重放分叉。
 import { nanoid } from 'nanoid'
 import type { Node as PMNode } from 'prosemirror-model'
-import { Plugin, type EditorState, type Transaction } from 'prosemirror-state'
+import { Plugin, type EditorState, type PluginKey, type Transaction } from 'prosemirror-state'
 import type { Step } from 'prosemirror-transform'
 
 // 新增/缺省/重复 blockId 一律重新生成（协作锚点依赖唯一性）；追加 setNodeMarkup 进 tr
@@ -21,7 +21,7 @@ export function ensureBlockIds(doc: PMNode, tr: Transaction): boolean {
 }
 
 // onSteps：追加事务的 step（blockId 修正）交给调用方并入同步队列
-export function createBlockIdPlugin(key: Plugin['key'], onSteps?: (steps: Step[]) => void): Plugin {
+export function createBlockIdPlugin(key: PluginKey, onSteps?: (steps: Step[]) => void): Plugin {
   return new Plugin({
     key,
     appendTransaction(transactions, _old: EditorState, newState: EditorState) {

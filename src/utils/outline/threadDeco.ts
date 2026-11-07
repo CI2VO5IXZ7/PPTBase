@@ -2,8 +2,8 @@
 // textRange 用 fromOffset/toOffset（块相对偏移）经 blockId 定位映射回当前文档坐标；
 // 绝对 from/to 仅代表服务端映射时刻，本地编辑后不再可信。
 import type { Node as PMNode } from 'prosemirror-model'
-import { Plugin, type EditorState } from 'prosemirror-state'
-import { Decoration, DecorationSet } from 'prosemirror-view'
+import { Plugin, type EditorState, type PluginKey } from 'prosemirror-state'
+import { Decoration, DecorationSet, type EditorProps } from 'prosemirror-view'
 import type { OutlineThread } from '../../types/outline'
 
 export function buildThreadDecorations(doc: PMNode, threads: OutlineThread[]): DecorationSet {
@@ -48,9 +48,9 @@ const threadsSig = (threads: OutlineThread[]) => threads.map(t => {
 // 生产装饰插件：插件状态持有 DecorationSet，本地事务经 set.map(tr.mapping) 平移；
 // 仅当服务端线程快照（签名）变化时整组重建——不会双重映射。
 export function createThreadDecoPlugin(
-  key: Plugin['key'],
+  key: PluginKey,
   getThreads: () => OutlineThread[],
-  extraProps?: Plugin['props'],
+  extraProps?: EditorProps,
 ): Plugin {
   let lastSig: string | null = null
   return new Plugin({
@@ -72,6 +72,6 @@ export function createThreadDecoPlugin(
     props: {
       decorations: state => key.getState(state) as DecorationSet,
       ...(extraProps ?? {}),
-    } as Plugin['props'],
+    },
   })
 }

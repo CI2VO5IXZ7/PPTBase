@@ -246,7 +246,7 @@ onMounted(() => {
             event.preventDefault(); void insertImages(files); return true
           },
           drop: (_v, event) => {
-            const files = Array.from(event.clipboardData?.files ?? []).filter(f => f.type.startsWith('image/'))
+            const files = Array.from(event.dataTransfer?.files ?? []).filter(f => f.type.startsWith('image/'))
             if (!files.length || props.readonly) return false
             event.preventDefault(); void insertImages(files); return true
           },
