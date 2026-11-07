@@ -20,7 +20,6 @@ export default function useOutlineSync() {
   let initPromise: Promise<void> | null = null
   let flushTimer: ReturnType<typeof setTimeout> | null = null
   let unsubscribe: (() => void) | null = null
-  let composing = false
 
   const core = new OutlineSyncCore(
     {
@@ -35,8 +34,9 @@ export default function useOutlineSync() {
         patchOutlineSteps(documentStore.docId, baseVersion, requestId, steps),
     },
     {
+      // buffered 清位只认 enqueue 落队/显式确认：'saved' 上报时缓冲必然已空（core 内保证），
+      // 不得在编辑器 300ms 缓冲还有新输入时提前清掉
       onStatus: (s, error) => {
-        if (s === 'saved') core.setBuffered(false)
         outline.setSaveStatus(s)
         outline.lastError = error ?? ''
       },
@@ -46,6 +46,14 @@ export default function useOutlineSync() {
           outline.stashDraft(core.localDraft.content, core.localDraft.steps)
         }
       },
+      // resolveConflict 移交的最终草稿（含冲突期间续编）：存 store 供刷新后取回/复制
+      onDraft: (d) => {
+        outline.stashDraft(d.content ?? outline.content ?? {}, d.steps)
+      },
+      // 冲突期间草稿续编实时同步 Pinia/sessionStorage：复制/刷新拿到的不是冲突时刻旧稿
+      onDraftUpdate: (d) => {
+        if (d.content) outline.stashDraft(d.content, d.steps)
+      },
       onVersion: (v, cv) => outline.setVersions(v, cv),
       onRemoteState: (state) => applyRemoteState(state),
     },
@@ -54,7 +62,7 @@ export default function useOutlineSync() {
 
   // 远端状态应用到 store：仅在无未提交内容时替换正文（避免覆盖正在输入的文本）
   function applyRemoteState(state: OutlineStateSnapshot) {
-    if (core.pendingCount || core.buffered || composing) {
+    if (core.pendingCount || core.buffered || core.composing) {
       core.remotePullPending = true
       outline.setVersions(state.version, outline.contentVersion)
       return
@@ -94,7 +102,8 @@ export default function useOutlineSync() {
     // 元数据 409 重放/超批续传：仍有未发 steps 时立即续传，不等下一次输入
     if (core.hasPending && core.status !== 'conflict') scheduleFlush(0)
     if (!ok && core.status === 'offline') scheduleFlush(OFFLINE_RETRY_DELAY)
-    if (ok && core.remotePullPending && !core.pendingCount && !composing) {
+    // 补拉前经 requestPull 复核：缓冲未落队/in-flight/组合中仍保持挂起，待下一次安全时机
+    if (ok && core.remotePullPending && core.requestPull(core.composing)) {
       core.remotePullPending = false
       void core.pull(true)
     }
@@ -109,19 +118,28 @@ export default function useOutlineSync() {
   }
 
   const drain = () => core.drain()
+  const dropDraft = () => core.dropDraft()
   const setComposing = (v: boolean) => {
-    composing = v
-    if (!v && core.remotePullPending) {
+    core.setComposing(v)
+    // 组合结束经 requestPull 复核才补拉：缓冲未落队/未发 steps/in-flight 时保持挂起等 flush
+    if (!v && core.remotePullPending && core.requestPull(false)) {
       core.remotePullPending = false
       void core.pull(true)
     }
   }
   const trackEditorDoc = (doc: Record<string, unknown>) => {
+    // 与 enqueueSteps 对称：只读态不置 buffered，否则永远无法清位、饿死 remotePullPending
+    if (outline.readonly) return
     core.trackDoc(doc)
     core.setBuffered(true) // 编辑器 300ms 聚合未落队，同样按未提交内容保护
   }
 
   async function resolveConflict() {
+    // 清掉残余调度：解决期间队列将整体清空，残留定时 flush 不得再按旧基线触发
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
     core.setBuffered(false)
     await core.resolveConflict()
     outline.conflictRemote = null
@@ -144,11 +162,12 @@ export default function useOutlineSync() {
         () => undefined,
         // outline 事件（含自身 PATCH 的服务端映射回执）：未提交/合成中置延迟标记，安全后补拉
         () => {
-          if (core.requestPull(composing)) void core.pull(true)
+          if (core.requestPull(core.composing)) void core.pull(true)
         },
-        // 断线重连：独立 GET 补拉，不依赖事件回放
+        // 断线重连：独立 GET 补拉，不依赖事件回放；遵守与 SSE 事件相同的
+        // IME/未提交延迟规则（组合期间只挂起，setComposing(false) 后补拉）
         () => {
-          void core.pull(true)
+          if (core.requestPull(core.composing)) void core.pull(true)
         },
       )
     }
@@ -184,5 +203,6 @@ export default function useOutlineSync() {
   return {
     init, destroy, flush, drain, scheduleFlush, refresh, resolveConflict,
     enqueueSteps, hasUnsavedChanges, pendingCount, preservePending, setComposing, trackEditorDoc,
+    dropDraft,
   }
 }

@@ -1,4 +1,4 @@
-// PPTBase 大纲浏览器验收（plan §9 全 13 例）。
+// PPTBase 大纲浏览器验收（plan §9 全 13 例 + 回归补例 14）。
 // 仅 PPTBASE_E2E=1 时执行（config testIgnore 保证），每用例独立临时 DATA_DIR。
 // 选择器优先用语义文本/稳定 class，避免依赖易变的 DOM 结构。
 import { test, expect, connectMcp, type E2EServer, type Page } from './fixtures'
@@ -696,4 +696,73 @@ test('13. 导航重连窄屏可用；旧 PPT 行为不回归', async ({ server, 
   await p.goto(server.baseUrl + '/')
   await expect(p.locator('body')).toContainText('create_outline')
   await expect(p.locator('body')).toContainText('begin_presentation_from_outline')
+})
+
+// ── 例14：冲突解决后点「丢弃草稿」不得污染后续编辑的卸载兜底（回归：draftDropped 永久置位丢数据）──
+test('14. 丢弃归档草稿后继续编辑：断网离开时新编辑仍进草稿可取回', async ({ server, outlinePage, request }) => {
+  const doc = await server.createDoc('dropdraft')
+  const A = api(request, server.baseUrl, bearer(server.apiKey))
+  await A.post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  // 延迟本地 PATCH，确保远端删块先落地 → 确定性 409（同例11）
+  await p.route(`**/api/docs/${doc.docId}/outline`, async route => {
+    if (route.request().method() === 'PATCH') {
+      await new Promise(r => setTimeout(r, 800))
+      await route.continue()
+    }
+    else await route.continue()
+  })
+  await ed.click()
+  await ed.locator('p').first().click()
+  await p.keyboard.type('DROP-BEFORE-1')
+  await expect(p.locator('.save')).toContainText(/未保存|保存中/, { timeout: 5000 })
+  const cur = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  const firstBlockId = cur.content.content[0].attrs.blockId
+  const opsRes = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: cur.version,
+    ops: [{ op: 'deleteBlocks', blockIds: [firstBlockId] }],
+  })
+  expect(opsRes.status()).toBe(200)
+  await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 10_000 })
+  // 刷新为最新版本（保留草稿）→ 冲突解决、草稿归档进横幅（saveStatus 回 saved）
+  await p.locator('button:has-text("刷新为最新版本")').click()
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
+  // 归档草稿仍在横幅 → 点「丢弃草稿」只应关横幅；回归点：不得留下永久 draftDropped
+  await p.locator('button:has-text("丢弃草稿")').click()
+  await expect(p.locator('.banner.conflict')).not.toBeVisible()
+  // 继续正常编辑并确认能正常落库（先证明正常保存链路未被污染）
+  await p.unroute(`**/api/docs/${doc.docId}/outline`)
+  await ed.locator('p').last().click()
+  await p.keyboard.press('End')
+  await p.keyboard.type('DROP-AFTER-2')
+  await waitSaved(p)
+  // 断网期间的新编辑 → 离开页面（真实组件卸载触发 onBeforeUnmount 兜底）
+  await p.route(`**/api/docs/${doc.docId}/outline`, route => {
+    if (route.request().method() === 'PATCH') route.abort('failed')
+    else route.continue()
+  })
+  await ed.locator('p').last().click()
+  await p.keyboard.press('End')
+  await p.keyboard.type('DROP-OFFLINE-3')
+  await expect(p.locator('.save')).toContainText(/未保存|失败/, { timeout: 15_000 })
+  // 卸载大纲组件：drain 3s 封顶失败后 snapshotPendingDraft → sessionStorage 草稿；
+  // 回归点：若非冲突态丢弃把 draftDropped 永久置位，此处快照为 null、新编辑全丢
+  await p.locator('#app').evaluate((el) => {
+    const host = el as unknown as { __vue_app__?: { unmount(): void } }
+    host.__vue_app__?.unmount()
+  })
+  await p.waitForFunction(
+    id => (sessionStorage.getItem(`PPTIST_OUTLINE_DRAFT_${id}`) ?? '').includes('DROP-OFFLINE-3'),
+    doc.docId,
+    { timeout: 10_000 },
+  )
+  // 刷新后从 sessionStorage 兜底恢复：横幅可再取回断网期间的新编辑
+  await p.unroute(`**/api/docs/${doc.docId}/outline`)
+  await p.reload()
+  await p.waitForSelector('.outline-editor .ProseMirror')
+  await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 10_000 })
+  await p.locator('button:has-text("复制草稿内容")').click()
+  const clip = await p.evaluate(() => (navigator as unknown as { clipboard: { readText(): Promise<string> } }).clipboard.readText())
+  expect(clip).toContain('DROP-OFFLINE-3')
 })

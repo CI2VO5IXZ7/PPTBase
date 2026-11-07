@@ -31,7 +31,7 @@
       本地未提交修改已保存为草稿（{{ draftSteps }} 步），不会自动丢弃。
       <button v-if="outline.saveStatus === 'conflict'" class="btn" @click="onDiscardDraft">刷新为最新版本（保留草稿）</button>
       <button v-if="outline.localDraft" class="btn" @click="copyDraft">复制草稿内容</button>
-      <button v-if="outline.localDraft" class="btn" @click="outline.dropDraft()">丢弃草稿</button>
+      <button v-if="outline.localDraft" class="btn" @click="onDropDraft">丢弃草稿</button>
     </div>
     <div v-else-if="outline.saveStatus === 'offline'" class="banner">
       保存失败：{{ outline.lastError }}。修改已保留，恢复后会自动重试。
@@ -42,7 +42,7 @@
     <main class="outline-main">
       <OutlineEditor
         ref="editorRef"
-        :readonly="outline.readonly"
+        :readonly="outline.readonly || resolving"
         :threads="outline.threads"
         :content="editorContent"
         :suspend-refresh="suspendRefresh"
@@ -84,6 +84,8 @@ const busy = ref(false)
 const drawerOpen = ref(true)
 const editorContent = ref<Record<string, unknown> | null>(null)
 const suspendRefresh = ref(false)
+// resolveConflict 期间禁编：杜绝 getState 在途时产生基于旧文档的新 steps 以新 baseVersion 发出
+const resolving = ref(false)
 
 const pptUrl = computed(() => `/?doc=${documentStore.docId}#t=${documentStore.token}`)
 const draftSteps = computed(() => outline.localDraft?.steps.length ?? 0)
@@ -206,7 +208,20 @@ const onRevoke = async () => {
 
 // 冲突：刷新为最新版本，本地草稿保留可复制
 const onDiscardDraft = async () => {
-  await sync.resolveConflict()
+  // 先禁编再冲刷：解决期间（getState 在途）不得再产生基于旧文档的新 steps
+  resolving.value = true
+  try {
+    editorRef.value?.flushNow()
+    await Promise.resolve() // 让 flushNow 同步 emit 的 steps 先并入草稿，避免旧基线 steps 以远端新 baseVersion 发出
+    await sync.resolveConflict()
+  }
+  finally {
+    resolving.value = false
+  }
+}
+const onDropDraft = () => {
+  outline.dropDraft()
+  sync.dropDraft()
 }
 const copyDraft = async () => {
   const d = outline.localDraft

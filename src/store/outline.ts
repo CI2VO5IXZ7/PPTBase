@@ -90,7 +90,7 @@ export const useOutlineStore = defineStore('outline', {
     },
     // 冲突保护：保存本地正文与未提交 steps；任何时刻可显式取回/放弃
     stashDraft(content: Record<string, unknown>, steps: Record<string, unknown>[]) {
-      this.localDraft = { content, steps, savedAt: Date.now() }
+      this.localDraft = { content, steps: [...steps], savedAt: Date.now() }
       if (this.docId) {
         try { sessionStorage.setItem(draftKey(this.docId), JSON.stringify(this.localDraft)) }
         catch { /* 存储不可用/超限不阻塞同步流程 */ }
