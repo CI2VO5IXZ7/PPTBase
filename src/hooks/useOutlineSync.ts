@@ -87,6 +87,8 @@ export default function useOutlineSync() {
 
   async function flush(): Promise<boolean> {
     const ok = await core.flush()
+    // 元数据 409 重放/超批续传：仍有未发 steps 时立即续传，不等下一次输入
+    if (core.hasPending && core.status !== 'conflict') scheduleFlush(0)
     if (!ok && core.status === 'offline') scheduleFlush(OFFLINE_RETRY_DELAY)
     if (ok && core.remotePullPending && !core.pendingCount && !composing) {
       core.remotePullPending = false

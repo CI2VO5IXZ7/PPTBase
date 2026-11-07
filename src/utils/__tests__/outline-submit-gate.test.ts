@@ -19,7 +19,7 @@ test('只读/忙碌/冲突/保存中阻塞', () => {
   assert.equal(outlineActionBlocked({ ...base, saveStatus: 'saving' }), true)
 })
 
-test('未保存/离线不直接阻塞（由 drain 冲刷后再判定）', () => {
+test('dirty 由 drain 冲刷不阻塞；offline（保存失败不可冲刷）阻塞', () => {
   assert.equal(outlineActionBlocked({ ...base, saveStatus: 'dirty' }), false)
-  assert.equal(outlineActionBlocked({ ...base, saveStatus: 'offline' }), false)
+  assert.equal(outlineActionBlocked({ ...base, saveStatus: 'offline' }), true)
 })

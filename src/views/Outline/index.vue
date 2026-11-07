@@ -107,7 +107,9 @@ const onSteps = (steps: Record<string, unknown>[]) => sync.enqueueSteps(steps)
 
 const onThreadOp = async (op: Record<string, unknown>) => {
   if (outline.readonly) return
-  // 线程操作先 drain 自动保存，避免 baseVersion 落后导致 409
+  // 先冲刷编辑器 300ms 缓冲（打字后秒按批注也不能丢/错基线），再 drain
+  editorRef.value?.flushNow()
+  await Promise.resolve()
   if (!(await sync.drain())) {
     outline.lastError = '请先解决未保存/冲突内容'; return
   }

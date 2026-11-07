@@ -30,7 +30,7 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useOutlineStore } from '@/store/outline'
-import { EditorState, PluginKey, type Command } from 'prosemirror-state'
+import { EditorState, NodeSelection, PluginKey, type Command } from 'prosemirror-state'
 import type { Step } from 'prosemirror-transform'
 import { EditorView } from 'prosemirror-view'
 import { createThreadDecoPlugin } from '@/utils/outline/threadDeco'
@@ -206,6 +206,11 @@ function applyImageAttrs() {
 function openImageAttrs(pos: number) {
   if (!view || props.readonly) return
   const node = view.state.doc.nodeAt(pos)
+  // 原子节点必须真正选中（NodeSelection），否则 commentSelection 不会产出 image 锚点
+  try {
+    view.dispatch(view.state.tr.setSelection(NodeSelection.create(view.state.doc, pos)).scrollIntoView())
+  }
+  catch { /* 位置失效时保持原选区 */ }
   if (!node || node.type.name !== 'image') return
   imageSel.value = { pos, blockId: node.attrs.blockId, caption: node.attrs.caption ?? '', usage: node.attrs.usage ?? 'reference', usageDescription: node.attrs.usageDescription ?? '' }
 }
@@ -286,7 +291,11 @@ onMounted(() => {
 // 远端正文替换：suspendRefresh（未保存/IME）时不重建
 watch(() => props.content, content => {
   if (!view || !content || props.suspendRefresh) return
-  view.updateState(EditorState.create({ schema: S, doc: S.nodeFromJSON(content), plugins: view.state.plugins }))
+  // 本地有未发出的 steps（300ms 缓冲）时绝不重建；内容相同（自回显）也跳过——保选区/undo
+  if (pendingSteps.length > 0) return
+  const next = S.nodeFromJSON(content)
+  if (next.eq(view.state.doc)) return
+  view.updateState(EditorState.create({ schema: S, doc: next, plugins: view.state.plugins }))
 })
 watch(() => props.readonly, () => view?.updateState(view.state))
 

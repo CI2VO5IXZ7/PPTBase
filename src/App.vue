@@ -59,10 +59,15 @@ const loadFailed = ref(false)
 
 const docSync = useDocumentSync()
 
-// 有 doc 时把文档令牌存进 document store，并用 replaceState 去掉地址栏 hash，避免分享截图泄露令牌
+// 有 doc 时把文档令牌存进 document store，并用 replaceState 去掉地址栏 hash，避免分享截图泄露令牌；
+// 令牌同时存 sessionStorage——否则剥离 hash 后刷新页面会掉成只读空文档
+const docTokenKey = (id: string) => 'pptist-doc-token-' + id
 if (docId) {
-  documentStore.setCredentials(docId, tokenMatch?.[1] || '')
-  if (tokenMatch) window.history.replaceState(null, '', window.location.pathname + window.location.search)
+  documentStore.setCredentials(docId, tokenMatch?.[1] || sessionStorage.getItem(docTokenKey(docId)) || '')
+  if (tokenMatch) {
+    sessionStorage.setItem(docTokenKey(docId), tokenMatch[1])
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
+  }
 }
 
 if (import.meta.env.MODE !== 'development') {

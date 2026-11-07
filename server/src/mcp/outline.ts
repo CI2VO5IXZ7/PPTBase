@@ -36,9 +36,13 @@ const MAX_READABLE_LINES = 200
 export function registerOutlineTools(server: McpServer, ctx: OutlineMcpCtx): void {
   const { db, config, outline, ownerId, keyId } = ctx
 
-  const ok = (data: unknown): TextResult => ({
-    content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }],
-  })
+  const ok = (data: unknown): TextResult => {
+    // 已构造好的 MCP 结果（如 image 内容块）原样返回，不得再包成 text
+    if (data && typeof data === 'object' && Array.isArray((data as { content?: unknown[] }).content)) {
+      return data as TextResult
+    }
+    return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }] }
+  }
   const call = <A>(fn: (args: A) => unknown | Promise<unknown>) =>
     async (args: A): Promise<TextResult> => {
       try {
@@ -217,6 +221,12 @@ export function registerOutlineTools(server: McpServer, ctx: OutlineMcpCtx): voi
     if (!existsSync(file)) throw AppError.notFound('图片文件不存在')
     const buf = readFileSync(file)
     if (buf.length > MAX_ASSET_BYTES) throw AppError.docTooLarge('图片文件超限')
-    return { content: [{ type: 'image' as const, data: buf.toString('base64'), mimeType: row.mime }] }
+    const meta = assetManifest(doc).find(a => a.assetId === assetId) ?? {}
+    return {
+      content: [
+        { type: 'image' as const, data: buf.toString('base64'), mimeType: row.mime },
+        { type: 'text' as const, text: JSON.stringify({ assetId, mime: row.mime, size: row.size, ...meta }, null, 2) },
+      ],
+    }
   }))
 }

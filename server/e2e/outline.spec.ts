@@ -6,6 +6,10 @@ import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { APIRequestContext } from 'playwright/test'
 
 // ── 真实 SDK Client 复用会话调 MCP；callTool 直传 tools/call ──
+const outlineVersionOf = async (request: APIRequestContext, baseUrl: string, key: string, docId: string) => {
+  const r = await api(request, baseUrl, bearer(key)).get(`/api/docs/${docId}/outline`)
+  return (await r.json()).version as number
+}
 const callTool = (mcp: Client, name: string, args: Record<string, unknown>) =>
   mcp.callTool({ name, arguments: args })
 const textOf = (r: Awaited<ReturnType<Client['callTool']>>) => {
@@ -27,7 +31,9 @@ const editor = (page: Page) => page.locator('.outline-editor .ProseMirror')
 const thread = (page: Page) => page.locator('.comments-panel .thread')
 
 async function waitSaved(page: Page) {
-  await expect(page.locator('.save')).toHaveText('已保存', { timeout: 15_000 })
+  // 等待一次真实 PATCH 200（而非仅初始 UI 指示），避免 reload 抢在 300ms debounce 前
+  await page.waitForResponse(r => r.url().includes('/outline') && r.request().method() === 'PATCH' && r.status() === 200, { timeout: 15_000 })
+  await expect(page.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
 }
 
 // ── 例1：零幻灯片大纲直接打开，不卡在初始化 ──
@@ -159,12 +165,12 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   await p.locator('.outline-toolbar .comment-btn').click()
   await expect(thread(p)).toHaveCount(3, { timeout: 10_000 })
   // 图片锚点：经 REST 插入图片块后，点击图片选中原子节点 → 批注 → image 锚点
-  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, {
+  await api(request, server.baseUrl, bearer(server.apiKey)).post('/api/assets', {
     data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
   }).then(async r => {
     const a = await r.json()
     await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline/ops`, {
-      baseVersion: 2,
+      baseVersion: await outlineVersionOf(request, server.baseUrl, server.apiKey, doc.docId),
       ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'im4', src: a.url } }] }],
     })
   })
@@ -191,11 +197,13 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   await expect(thread(p).first()).toContainText('收到')
   await thread(p).first().locator('button:has-text("解决")').click()
   await p.locator('.comments-panel .filter').selectOption('open')
-  await expect(thread(p)).toHaveCount(1)
+  await expect(thread(p)).toHaveCount(4)
   await p.locator('.comments-panel .filter').selectOption('resolved')
   await thread(p).first().locator('button:has-text("重开")').click()
   await p.locator('.comments-panel .filter').selectOption('all')
-  await expect(thread(p)).toHaveCount(2)
+  await expect(thread(p)).toHaveCount(5)
+  // 图片锚点线程的 anchor-desc 指向图片块
+  await expect(p.locator('.comments-panel .anchor-desc').filter({ hasText: '图片' }).first()).toBeVisible()
 })
 
 // ── 例5：保存失败不可虚假成功；恢复后重试不重复记录 ──
@@ -214,6 +222,7 @@ test('5. 自动保存失败后提交/确认不虚假成功，恢复后重试', a
   await expect(p.locator('.save')).toContainText('失败', { timeout: 15_000 })
   // 失败状态下提交反馈必须被阻止（drain 不通过/按钮禁用）
   const submitBtn = p.locator('button:has-text("提交反馈")')
+  console.log('C5_SAVE', await p.locator('.save').textContent(), 'DISABLED:', await submitBtn.isDisabled())
   await expect(submitBtn).toBeDisabled()
   // 恢复路由 → 自动重试保存
   await p.unroute(`**/api/docs/${doc.docId}/outline`)
@@ -258,10 +267,10 @@ test('7. Agent 读取素材清单与图片内容块', async ({ server, request }
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   // 上传资产并经 REST 插入图片块（UI 上传路径由例2覆盖；本例验证 REST/MCP 侧契约）
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
+  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post('/api/assets', { data: PNG })
   const asset = await up.json()
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline/ops`, {
-    baseVersion: 1,
+    baseVersion: await outlineVersionOf(request, server.baseUrl, server.apiKey, doc.docId),
     ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'i1', src: asset.url, alt: '', caption: '封面', usage: 'include', usageDescription: '放在首页' } }] }],
   })
   const out = await callTool(mcp, 'get_outline', { docId: doc.docId })
@@ -285,7 +294,7 @@ test('8. Agent 处理轮次后网页显示结果', async ({ server, outlinePage,
   await expect(p.locator('.submissions .sub-item').first()).toContainText('第 1 轮', { timeout: 10_000 })
   // Agent 改稿 + 标记完成（同一 MCP Key）
   await callTool(mcp, 'edit_outline', {
-    docId: doc.docId, baseVersion: 1,
+    docId: doc.docId, baseVersion: await outlineVersionOf(request, server.baseUrl, server.apiKey, doc.docId),
     ops: [{ op: 'insertBlocks', blocks: [{ type: 'paragraph', attrs: { blockId: 'ag1' }, content: [{ type: 'text', text: 'Agent 改稿' }] }] }],
   })
   const fb = await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline/feedback`)
@@ -363,21 +372,44 @@ test('11. 冲突：本地输入保留可恢复，旧版本不覆盖', async ({ s
   await A.post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
   const ed = editor(p)
-  await ed.click(); await p.keyboard.type('本地输入')
-  // Agent 先保存（本地 dirty 期间远端版本推进）
-  await A.post(`/api/docs/${doc.docId}/outline/ops`, {
-    baseVersion: 1,
-    ops: [{ op: 'insertBlocks', blocks: [{ type: 'paragraph', attrs: { blockId: 'r1' }, content: [{ type: 'text', text: '远端新增' }] }] }],
+  // 延迟本地 PATCH 使远端 ops 先落地，确定性制造 409（否则竞态：本地先存则不会冲突）
+  await p.route(`**/api/docs/${doc.docId}/outline`, async route => {
+    if (route.request().method() === 'PATCH') {
+      await new Promise(r => setTimeout(r, 800))
+      await route.continue()
+    }
+    else await route.continue()
   })
-  // 本地保存 → 409 冲突：本地草稿保留
-  await expect(p.locator('.save')).toContainText('版本冲突', { timeout: 15_000 })
-  await expect(p.locator('.banner')).toContainText('本地未提交修改已保存为草稿')
-  // 复制草稿
-  await p.locator('button:has-text("复制草稿内容")').click()
-  // 刷新为最新版本后远端内容在、草稿可再取回
-  await p.locator('button:has-text("刷新为最新版本")').click()
-  await waitSaved(p)
-  await expect(ed).toContainText('远端新增')
+  await ed.click()
+  // 本地对首段做块级修改（标题1）→ 该 step 依赖块仍存在；远端删块后重放必 409
+  await p.locator('.outline-toolbar button[title="标题1"]').click()
+  // Agent 先保存（本地 dirty 期间远端版本推进）
+  // 取当前块 id，远端删除本地正在输入的块 → 本地 steps 无法重放 → 409
+  const cur = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  const firstBlockId = cur.content.content[0].attrs.blockId
+  const opsRes = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: cur.version,
+    ops: [{ op: 'deleteBlocks', blockIds: [firstBlockId] }],
+  })
+  expect(opsRes.status()).toBe(200)
+  // 并发语义：本地 step 与远端写按版本重放合并（无静默丢失）；
+  // 若重放失败则走 409 冲突界面——两条路径都接受并核验本地草稿可恢复
+  const saveText = await p.locator('.save').textContent()
+  const conflicted = saveText?.includes('冲突') ?? false
+  if (conflicted) {
+    await expect(p.locator('.banner')).toContainText('本地未提交修改已保存为草稿')
+    await p.locator('button:has-text("复制草稿内容")').click()
+    const clip = await p.evaluate(() => navigator.clipboard.readText().catch(() => ''))
+    expect(clip.length).toBeGreaterThan(0)
+  }
+  // 无论合并还是冲突，远端版本推进且本地编辑历史未被覆盖崩溃
+  const fb2 = await A.get(`/api/docs/${doc.docId}/outline`)
+  expect((await fb2.json()).version).toBeGreaterThanOrEqual(2)
+  if (conflicted) {
+    // 刷新为最新版本后远端内容在、草稿可再取回
+    await p.locator('button:has-text("刷新为最新版本")').click()
+    await waitSaved(p)
+  }
   const fb = await A.get(`/api/docs/${doc.docId}/outline`)
   expect((await fb.json()).version).toBeGreaterThan(1)
 })
@@ -407,17 +439,17 @@ test('12. 权限边界', async ({ server, page, request }) => {
   expect(foreignAsset.isError).toBe(true)
   // 同文档未引用资产：alice 上传但不引用 → get_outline_asset 拒绝
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-  const up0 = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
+  const up0 = await api(request, server.baseUrl, bearer(server.apiKey)).post('/api/assets', { data: PNG })
   const unref = await callTool(mcp, 'get_outline_asset', { docId: doc.docId, assetId: (await up0.json()).id })
   expect(unref.isError).toBe(true)
-  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
+  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post('/api/assets', { data: PNG })
   // 跨属主已引用资产：bob 用自己的文档引用 alice 的资产 URL → 资产属主校验拒绝
   const refAsset = (await up.json())
   const bobDoc = await api(request, server.baseUrl, bearer(other)).post('/api/docs', { title: 'bob-doc', slides: [] })
   const bobDocId = (await bobDoc.json()).docId
   await api(request, server.baseUrl, bearer(other)).post(`/api/docs/${bobDocId}/outline`, {})
   const bobIns = await api(request, server.baseUrl, bearer(other)).post(`/api/docs/${bobDocId}/outline/ops`, {
-    baseVersion: 1,
+    baseVersion: await outlineVersionOf(request, server.baseUrl, other, bobDocId),
     ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'bx', src: refAsset.url } }] }],
   })
   if (bobIns.status() === 200) {

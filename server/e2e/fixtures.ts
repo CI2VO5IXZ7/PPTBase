@@ -1,6 +1,9 @@
 // E2E 隔离夹具：每用例独立临时 DATA_DIR（DB+assets），内存随机端口起真实应用。
 // 不碰任何真实账号/数据/Key；用例结束仅清理本用例创建的临时目录。
 import { test as base, expect, type Page } from 'playwright/test'
+import { fileURLToPath } from 'node:url'
+import { dirname as _dirname } from 'node:path'
+const __dirname = _dirname(fileURLToPath(import.meta.url))
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -73,6 +76,8 @@ async function startServer(): Promise<E2EServer> {
       return `${baseUrl}/?doc=${docId}${tabQ}${modeQ}#t=${t}`
     },
     async close() {
+      // SSE 订阅/MCP 长连接会阻塞 app.close() → 先强制断开底层 socket
+      app.server.closeAllConnections?.()
       await app.close()
       rmSync(dir, { recursive: true, force: true })
     },
@@ -81,7 +86,7 @@ async function startServer(): Promise<E2EServer> {
 }
 
 export const test = base.extend<{ server: E2EServer, outlinePage: (docId: string, mode?: 'view' | 'edit') => Promise<Page> }>({
-  server: async (_fixtures, use) => {
+  server: async ({ page: _page }, use) => {
     const s = await startServer()
     await use(s)
     await s.close()

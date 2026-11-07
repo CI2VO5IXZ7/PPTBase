@@ -236,6 +236,10 @@ export class OutlineSyncCore {
   get pendingCount() {
     return this.queue.size
   }
+  // 含在途批次（元数据 409 重放/多批次续传都依赖它触发下一轮 flush）
+  get hasPending() {
+    return this.queue.size > 0 || this.queue.inFlight
+  }
   get hasUnsaved() {
     return this.queue.size > 0 || this.status === 'saving' || this.status === 'dirty'
   }
