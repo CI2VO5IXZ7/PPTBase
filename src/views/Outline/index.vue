@@ -70,7 +70,8 @@ import { nanoid } from 'nanoid'
 import { useDocumentStore } from '@/store/document'
 import { useOutlineStore } from '@/store/outline'
 import useOutlineSync from '@/hooks/useOutlineSync'
-import type { OutlineAnchorSpec } from '@/types/outline'
+import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
+import { outlineActionBlocked } from '@/utils/outline/submitGate'
 import { submitOutlineFeedback, approveOutline, revokeOutlineApproval, postOutlineOps } from '@/services/outline'
 import OutlineEditor from './OutlineEditor.vue'
 import CommentsPanel from './CommentsPanel.vue'
@@ -93,8 +94,10 @@ const submittedInfo = computed(() => {
   const dirty = outline.contentVersion > last.contentVersion
   return `已提交第 ${last.round} 轮（c${last.contentVersion}）${dirty ? '·其后还有未提交修改' : ''}`
 })
-const canAct = computed(() => !busy.value && !outline.readonly && !outline.uploadsPending
-  && outline.saveStatus !== 'conflict' && outline.saveStatus !== 'saving')
+const canAct = computed(() => !outlineActionBlocked({
+  busy: busy.value, readonly: outline.readonly,
+  uploadsPending: outline.uploadsPending, saveStatus: outline.saveStatus,
+}))
 
 const saveText = computed(() => ({
   saved: '已保存', saving: '保存中…', dirty: '未保存', offline: '保存失败', conflict: '版本冲突',
@@ -123,9 +126,11 @@ const onThreadOp = async (op: Record<string, unknown>) => {
   }
 }
 
-const onLocate = () => {
-  // 点击锚点定位：暂时滚动到批注面板内高亮区（editor 侧 decoration 已标亮原文位置）
-  document.querySelector('.thread-hl')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+const onLocate = (t: OutlineThread) => {
+  // 定位该线程自身的高亮；脱离/无文档高亮时回退到面板中该线程条目
+  const target = document.querySelector(`.ProseMirror [data-thread-id="${t.id}"]`)
+    ?? document.querySelector(`.comments-panel [data-thread-id="${t.id}"]`)
+  target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 const onCommentRange = (anchor: OutlineAnchorSpec) => {
   const content = window.prompt('批注内容')

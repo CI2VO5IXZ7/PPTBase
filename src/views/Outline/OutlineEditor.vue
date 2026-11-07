@@ -30,7 +30,7 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useOutlineStore } from '@/store/outline'
-import { EditorState, NodeSelection, Plugin, PluginKey, type Command, type Transaction } from 'prosemirror-state'
+import { EditorState, Plugin, PluginKey, type Command, type Transaction } from 'prosemirror-state'
 import { Decoration, DecorationSet, EditorView } from 'prosemirror-view'
 import { undo, redo, history } from 'prosemirror-history'
 import { keymap } from 'prosemirror-keymap'
@@ -105,12 +105,17 @@ function threadDecorations(state: EditorState): DecorationSet {
       const start = a.pos !== undefined && doc.nodeAt(a.pos)?.attrs.blockId === a.blockId ? a.pos : byId.get(a.blockId)
       if (start === undefined) continue
       const node = doc.nodeAt(start)
-      if (node) decos.push(Decoration.node(start, start + node.nodeSize, { class: cls }))
+      if (node) decos.push(Decoration.node(start, start + node.nodeSize, { class: cls, 'data-thread-id': t.id }))
     }
     else if (a.kind === 'textRange') {
       for (const f of a.fragments ?? []) {
         if (f.detached) continue
-        if (f.to > f.from && f.to <= doc.content.size) decos.push(Decoration.inline(f.from, f.to, { class: cls }))
+        // 片段 offset 是相对所在 textblock 内容起点的，必须经 blockId 映射回文档坐标
+        const bStart = byId.get(f.blockId)
+        if (bStart === undefined) continue
+        const from = bStart + 1 + f.from
+        const to = bStart + 1 + f.to
+        if (to > from && to <= doc.content.size + 1) decos.push(Decoration.inline(from, to, { class: cls, 'data-thread-id': t.id }))
       }
     }
   }
@@ -208,7 +213,7 @@ async function doUpload(item: { id: string, name: string, file: File, status: st
     return
   }
   u.status = 'done'
-  insertImageNode(asset.url, item.file.name)
+  insertImageNode(asset.url, item.file.name, asset.id)
 }
 function retryUpload(u: (typeof uploads.value)[number]) {
   u.status = 'uploading'
@@ -222,10 +227,11 @@ function removeUpload(u: (typeof uploads.value)[number]) {
 watch(() => props.readonly, ro => {
   if (ro) uploads.value = []
 })
-function insertImageNode(src: string, name: string) {
-  if (!view) return
+function insertImageNode(src: string, name: string, assetId = '') {
+  // 权限可能在上传期间变化：回调不得绕过只读
+  if (!view || props.readonly) return
   const tr = view.state.tr.replaceSelectionWith(
-    S.nodes.image.create({ blockId: `b_${nanoid(10)}`, src, alt: name, caption: '', usage: 'reference', usageDescription: '' })
+    S.nodes.image.create({ blockId: `b_${nanoid(10)}`, src, alt: name, caption: '', usage: 'reference', usageDescription: '', assetId })
   ).scrollIntoView()
   view.dispatch(tr)
 }

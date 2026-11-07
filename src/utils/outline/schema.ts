@@ -85,6 +85,7 @@ export const outlineSchema = new Schema({
           if (!IMAGE_USAGES.includes(v as never)) throw new RangeError('usage 必须是 reference|include') 
         } },
         usageDescription: { default: '' },
+        assetId: { default: '' },
       },
       defining: true,
       selectable: true,

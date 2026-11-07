@@ -1,7 +1,7 @@
 // 前端选区适配器 vs 服务端真实 createAnchor（共享模块真实语义，不复制假实现）
 import { describe, expect, it } from 'vitest'
-import { Schema } from 'prosemirror-model'
-import { TextSelection } from 'prosemirror-state'
+
+import { NodeSelection, TextSelection } from 'prosemirror-state'
 import { selectionToAnchorSpec } from '../../src/utils/outline/anchorSpec'
 import { createAnchor } from '../../src/utils/outline/anchors'
 import { outlineSchema } from '../../src/utils/outline/schema'
@@ -35,6 +35,21 @@ describe('selectionToAnchorSpec → createAnchor（真实链路）', () => {
     const anchor = createAnchor(doc, spec, 1)
     expect(anchor.kind).toBe('block')
     expect(anchor.blockId).toBe('p1')
+  })
+
+  it('图片 NodeSelection → image 锚点（真实 NodeSelection 对象）', () => {
+    const imgDoc = outlineSchema.nodes.doc.create(null, [
+      para('pA', '前文'),
+      outlineSchema.nodes.image.create({ blockId: 'img1', src: '/assets/x.png', assetId: 'x' }),
+    ])
+    const imgPos = para('pA', '前文').nodeSize // 文档内 pA 之后即为图片节点起始位置
+    const ns = NodeSelection.create(imgDoc, imgPos)
+    expect(ns.node?.type.name).toBe('image')
+    const spec = selectionToAnchorSpec(imgDoc, ns)
+    expect(spec).toEqual({ kind: 'image', blockId: 'img1' })
+    const anchor = createAnchor(imgDoc, spec, 1)
+    expect(anchor.kind).toBe('image')
+    expect(anchor.blockId).toBe('img1')
   })
 
   it('选区完全在列表项文字内：fragment 指向 textblock p3 而非容器', () => {

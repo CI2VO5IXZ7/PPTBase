@@ -1,27 +1,18 @@
 // PPTBase 大纲浏览器验收（plan §9 全 13 例）。
 // 仅 PPTBASE_E2E=1 时执行（config testIgnore 保证），每用例独立临时 DATA_DIR。
 // 选择器优先用语义文本/稳定 class，避免依赖易变的 DOM 结构。
-import { test, expect, type E2EServer, type Page } from './fixtures'
+import { test, expect, connectMcp, type E2EServer, type Page } from './fixtures'
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { APIRequestContext } from 'playwright/test'
 
-// ── 通过真实 HTTP 调 MCP（Streamable HTTP JSON-RPC，同 /mcp 端点同 Key）──
-async function mcpCall(request: APIRequestContext, baseUrl: string, key: string, tool: string, args: Record<string, unknown>) {
-  const init = await request.post(`${baseUrl}/mcp`, {
-    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
-    data: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'e2e', version: '0' } } },
-  })
-  const sessionId = init.headers()['mcp-session-id']
-  const res = await request.post(`${baseUrl}/mcp`, {
-    headers: {
-      authorization: `Bearer ${key}`, 'content-type': 'application/json',
-      accept: 'application/json, text/event-stream', ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
-    },
-    data: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } },
-  })
-  const text = await res.text()
-  const line = text.split('\n').find(l => l.startsWith('data:')) ?? text
-  return JSON.parse(line.replace(/^data:\s*/, ''))
+// ── 真实 SDK Client 复用会话调 MCP；callTool 直传 tools/call ──
+const callTool = (mcp: Client, name: string, args: Record<string, unknown>) =>
+  mcp.callTool({ name, arguments: args })
+const textOf = (r: Awaited<ReturnType<Client['callTool']>>) => {
+  const c = r.content as { type: string, text?: string }[] | undefined
+  return c?.[0]?.text ?? ''
 }
+
 
 // REST（Agent/用户令牌）
 const api = (request: APIRequestContext, baseUrl: string, headers: Record<string, string>) => ({
@@ -82,12 +73,29 @@ test('2. 编辑+IME+撤销重做保存后刷新不丢', async ({ server, page, o
   await p.keyboard.press('Control+z')
   await p.keyboard.press('Control+Shift+z')
   await expect(ed.locator('li').nth(1)).toContainText('列表项二')
+  // 真实 UI 上传：filechooser 捕获动态 <input type=file>，插入后经属性面板改 caption/usage
+  const chooser = p.waitForEvent('filechooser')
+  await p.locator('.pick-btn').click()
+  await (await chooser).setFiles({
+    name: 'cover.png', mimeType: 'image/png',
+    buffer: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'),
+  })
+  await expect(ed.locator('figure.outline-image img')).toBeVisible({ timeout: 15_000 })
+  await ed.locator('figure.outline-image').click()
+  await expect(p.locator('.image-attrs')).toBeVisible()
+  await p.locator('.image-attrs input').first().fill('封面图')
+  await p.locator('.image-attrs select').selectOption('include')
+  await p.locator('.image-attrs input').first().press('Tab')
   await waitSaved(p)
   await p.reload()
   await p.waitForSelector('.outline-editor .ProseMirror')
   await expect(ed).toContainText('中文大纲')
   await expect(ed.locator('h1')).toContainText('标题')
   await expect(ed.locator('li').nth(1)).toContainText('列表项二')
+  // 图片与属性持久化（figcaption 回显精确 caption；figure 上 usage 数据属性）
+  await expect(ed.locator('figure.outline-image img')).toBeVisible()
+  await expect(ed.locator('figure.outline-image figcaption')).toContainText('封面图')
+  await expect(ed.locator('figure.outline-image')).toHaveAttribute('data-usage', 'include')
 })
 
 // ── 例3：文字批注锚点映射与失效保留 ──
@@ -186,6 +194,7 @@ test('5. 自动保存失败后提交/确认不虚假成功，恢复后重试', a
 
 // ── 例6：提交后继续编辑，区分已提交与未提交；Agent 读所选轮次快照 ──
 test('6. 提交后编辑：轮次快照与当前稿区分', async ({ server, outlinePage, request }) => {
+  const mcp = await connectMcp(server)
   const doc = await server.createDoc('rounds')
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
@@ -204,32 +213,34 @@ test('6. 提交后编辑：轮次快照与当前稿区分', async ({ server, out
   expect(snapJson).toContain('第一轮内容')
   expect(snapJson).not.toContain('提交后新增')
   // MCP 读取当前稿含新增（当前版本 ≠ 快照）
-  const cur = await mcpCall(request, server.baseUrl, server.apiKey, 'get_outline', { docId: doc.docId })
-  expect(JSON.stringify(cur.result)).toContain('提交后新增')
+  const cur = await callTool(mcp, 'get_outline', { docId: doc.docId })
+  expect(JSON.stringify(cur)).toContain('提交后新增')
 })
 
 // ── 例7：素材清单 + get_outline_asset 返回图片内容块 ──
 test('7. Agent 读取素材清单与图片内容块', async ({ server, request }) => {
+  const mcp = await connectMcp(server)
   const doc = await server.createDoc('assets')
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
-  // 上传资产并经 REST 插入图片块（UI 上传路径由单独人工/browser case 覆盖）
+  // 上传资产并经 REST 插入图片块（UI 上传路径由例2覆盖；本例验证 REST/MCP 侧契约）
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
+  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: { data: PNG } })
   const asset = await up.json()
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline/ops`, {
     baseVersion: 1,
     ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'i1', src: asset.url, alt: '', caption: '封面', usage: 'include', usageDescription: '放在首页' } }] }],
   })
-  const out = await mcpCall(request, server.baseUrl, server.apiKey, 'get_outline', { docId: doc.docId })
-  const manifest = out.result.content[0].text ? JSON.parse(out.result.content[0].text).assets : out.result.structuredContent?.assets
+  const out = await callTool(mcp, 'get_outline', { docId: doc.docId })
+  const manifest = JSON.parse(textOf(out)).assets
   expect(manifest[0].usage).toBe('include')
   expect(manifest[0].usageDescription).toBe('放在首页')
-  const img = await mcpCall(request, server.baseUrl, server.apiKey, 'get_outline_asset', { docId: doc.docId, assetId: asset.id })
-  expect(img.result.content[0].type).toBe('image')
+  const img = await callTool(mcp, 'get_outline_asset', { docId: doc.docId, assetId: asset.id })
+  expect((img.content as { type: string }[])[0].type).toBe('image')
 })
 
 // ── 例8：Agent 处理一轮反馈：网页可见改稿/回复与处理结果；新一轮仍待处理 ──
 test('8. Agent 处理轮次后网页显示结果', async ({ server, outlinePage, request }) => {
+  const mcp = await connectMcp(server)
   const doc = await server.createDoc('handle')
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
@@ -239,13 +250,13 @@ test('8. Agent 处理轮次后网页显示结果', async ({ server, outlinePage,
   await p.locator('button:has-text("提交反馈")').click()
   await expect(p.locator('.submissions .sub-item').first()).toContainText('第 1 轮', { timeout: 10_000 })
   // Agent 改稿 + 标记完成（同一 MCP Key）
-  await mcpCall(request, server.baseUrl, server.apiKey, 'edit_outline', {
+  await callTool(mcp, 'edit_outline', {
     docId: doc.docId, baseVersion: 1,
     ops: [{ op: 'insertBlocks', blocks: [{ type: 'paragraph', attrs: { blockId: 'ag1' }, content: [{ type: 'text', text: 'Agent 改稿' }] }] }],
   })
   const fb = await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline/feedback`)
   const sub = (await fb.json()).submissions[0]
-  await mcpCall(request, server.baseUrl, server.apiKey, 'complete_outline_feedback', { docId: doc.docId, submissionId: sub.id, note: '已按要求改' })
+  await callTool(mcp, 'complete_outline_feedback', { docId: doc.docId, submissionId: sub.id, note: '已按要求改' })
   // 用户再提一轮 → 仍待处理
   await p.reload(); await p.waitForSelector('.outline-editor .ProseMirror')
   await expect(ed).toContainText('Agent 改稿')
@@ -258,33 +269,36 @@ test('8. Agent 处理轮次后网页显示结果', async ({ server, outlinePage,
 
 // ── 例9：未确认时 MCP+REST 制片被拒；确认后同工具生成 PPT ──
 test('9. 制作门禁：未确认拒绝，确认后可制作', async ({ server, outlinePage, request }) => {
+  const mcp = await connectMcp(server)
   const doc = await server.createDoc('gate')
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   // 未确认 → REST ops 409、MCP add_slides 报错
   const blocked = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'addSlides', slides: [{ id: 's', elements: [] }] }] })
   expect(blocked.status()).toBe(409)
-  const mBlocked = await mcpCall(request, server.baseUrl, server.apiKey, 'add_slides', { docId: doc.docId, slides: [{ id: 's', elements: [] }] })
-  expect(JSON.stringify(mBlocked.result ?? mBlocked)).toContain('确认来源')
+  const mBlocked = await callTool(mcp, 'add_slides', { docId: doc.docId, slides: [{ id: 's', elements: [] }] })
+  expect(mBlocked.isError).toBe(true)
+  expect(textOf(mBlocked)).toContain('确认来源')
   // 网页确认 → begin → 写页面通过
   const p = await outlinePage(doc.docId)
   await p.locator('button:has-text("确认大纲，进入制作")').click()
   await expect(p.locator('.outline-header')).toContainText('已确认', { timeout: 10_000 })
-  const begin = await mcpCall(request, server.baseUrl, server.apiKey, 'begin_presentation_from_outline', { docId: doc.docId })
-  const approvalId = JSON.parse(begin.result.content[0].text).approvalId
-  const ok = await mcpCall(request, server.baseUrl, server.apiKey, 'add_slides', { docId: doc.docId, slides: [{ id: 's1', elements: [] }], sourceApprovalId: approvalId })
-  expect(ok.result.isError).toBeFalsy()
+  const begin = await callTool(mcp, 'begin_presentation_from_outline', { docId: doc.docId })
+  const approvalId = JSON.parse(textOf(begin)).approvalId
+  const ok = await callTool(mcp, 'add_slides', { docId: doc.docId, slides: [{ id: 's1', elements: [] }], sourceApprovalId: approvalId })
+  expect(ok.isError).toBeFalsy()
 })
 
 // ── 例10：确认后正文变→旧来源失效；仅评论不失效；撤销立即生效 ──
 test('10. 来源失效语义：正文/撤销 失效，评论 不失效', async ({ server, outlinePage, request }) => {
+  const mcp = await connectMcp(server)
   const doc = await server.createDoc('stale')
   const A = api(request, server.baseUrl, bearer(server.apiKey))
   await A.post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
   await p.locator('button:has-text("确认大纲，进入制作")').click()
   await expect(p.locator('.outline-header')).toContainText('已确认', { timeout: 10_000 })
-  const begin = await mcpCall(request, server.baseUrl, server.apiKey, 'begin_presentation_from_outline', { docId: doc.docId })
-  const approvalId = JSON.parse(begin.result.content[0].text).approvalId
+  const begin = await callTool(mcp, 'begin_presentation_from_outline', { docId: doc.docId })
+  const approvalId = JSON.parse(textOf(begin)).approvalId
   // 仅加批注 → 仍有效
   const state = (await (await A.get(`/api/docs/${doc.docId}/outline`)).json())
   await api(request, server.baseUrl, tok(server.tokens(doc.docId).edit)).post(`/api/docs/${doc.docId}/outline/ops`, {
@@ -336,6 +350,7 @@ test('11. 冲突：本地输入保留可恢复，旧版本不覆盖', async ({ s
 
 // ── 例12：权限边界：只读/失效令牌/禁用账号/他人 Key/跨项目素材 ──
 test('12. 权限边界', async ({ server, page, request }) => {
+  const mcp = await connectMcp(server)
   const doc = await server.createDoc('auth')
   const A = api(request, server.baseUrl, bearer(server.apiKey))
   await A.post(`/api/docs/${doc.docId}/outline`, {})
@@ -350,17 +365,32 @@ test('12. 权限边界', async ({ server, page, request }) => {
   expect([401, 403, 404]).toContain(bad.status())
   // 其他用户 Key：404（不存在观感）
   const other = await startOtherUser(server)
+  const mcpB = await connectMcp(server, other)
   const foreign = await api(request, server.baseUrl, bearer(other)).get(`/api/docs/${doc.docId}/outline`)
   expect(foreign.status()).toBe(404)
   // 跨项目素材：bob 的资产/文档 id 互不可见
-  const foreignAsset = await mcpCall(request, server.baseUrl, other, 'get_outline_asset', { docId: doc.docId, assetId: 'whatever' })
-  expect(JSON.stringify(foreignAsset.result ?? foreignAsset)).toContain('不存在或不属于')
+  const foreignAsset = await callTool(mcpB, 'get_outline_asset', { docId: doc.docId, assetId: 'whatever' })
+  expect(foreignAsset.isError).toBe(true)
   // 同文档未引用资产：alice 上传但不引用 → get_outline_asset 拒绝
   const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
-  const unref = await mcpCall(request, server.baseUrl, server.apiKey, 'get_outline_asset', { docId: doc.docId, assetId: (await up.json()).id })
-  expect(unref.result.isError).toBe(true)
-  // 旋转链接后旧令牌失效
+  const up0 = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: { data: PNG } })
+  const unref = await callTool(mcp, 'get_outline_asset', { docId: doc.docId, assetId: (await up0.json()).id })
+  expect(unref.isError).toBe(true)
+  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: { data: PNG } })
+  // 跨属主已引用资产：alice 上传并在自有文档引用后，bob 的 MCP Key 仍不可取（属主+引用双校验）
+  const refAsset = (await up.json())
+  await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: 1,
+    ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'xa', src: refAsset.url } }] }],
+  })
+  const crossOwner = await callTool(mcpB, 'get_outline_asset', { docId: doc.docId, assetId: refAsset.id })
+  expect(crossOwner.isError).toBe(true)
+  // 只读视图页面不带可写控件（账号仍启用时加载，验证令牌态 UI）
+  await page.goto(server.docUrl(doc.docId, 'outline', 'view'))
+  await page.waitForSelector('.outline-editor .ProseMirror')
+  await expect(page.locator('.outline-toolbar')).not.toBeVisible()
+  await expect(page.locator('button:has-text("提交反馈")')).not.toBeVisible()
+  // 旋转链接后旧令牌失效（令牌无内置过期；吊销=rotate）
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/links/rotate`, {})
   const rotated = await api(request, server.baseUrl, tok(tokens.view)).get(`/api/docs/${doc.docId}/outline`)
   expect([401, 403, 404]).toContain(rotated.status())
@@ -368,11 +398,6 @@ test('12. 权限边界', async ({ server, page, request }) => {
   server.db.prepare('UPDATE users SET status = ? WHERE id = ?').run('disabled', server.userId)
   const disabled = await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline`)
   expect([401, 403]).toContain(disabled.status())
-  // 只读视图页面不带可写控件
-  await page.goto(server.docUrl(doc.docId, 'outline', 'view'))
-  await page.waitForSelector('.outline-editor .ProseMirror')
-  await expect(page.locator('.outline-toolbar')).not.toBeVisible()
-  await expect(page.locator('button:has-text("提交反馈")')).not.toBeVisible()
 })
 
 async function startOtherUser(server: E2EServer): Promise<string> {

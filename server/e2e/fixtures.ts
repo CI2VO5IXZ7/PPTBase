@@ -1,6 +1,8 @@
 // E2E 隔离夹具：每用例独立临时 DATA_DIR（DB+assets），内存随机端口起真实应用。
 // 不碰任何真实账号/数据/Key；用例结束仅清理本用例创建的临时目录。
 import { test as base, expect, type Page } from 'playwright/test'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -93,6 +95,16 @@ export const test = base.extend<{ server: E2EServer, outlinePage: (docId: string
     })
   },
 })
+
+// 同一 MCP Client 复用会话完成整个工作流（真实 SDK 传输，非逐调用裸 POST）
+export async function connectMcp(server: E2EServer, key = server.apiKey): Promise<Client> {
+  const client = new Client({ name: 'e2e', version: '0' }, { capabilities: {} })
+  await client.connect(new StreamableHTTPClientTransport(
+    new URL(`${server.baseUrl}/mcp`),
+    { requestInit: { headers: { authorization: `Bearer ${key}` } } },
+  ))
+  return client
+}
 
 export { expect }
 export type { Page }

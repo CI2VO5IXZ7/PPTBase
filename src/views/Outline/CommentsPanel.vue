@@ -22,7 +22,7 @@
     </div>
 
     <div class="threads">
-      <div v-for="t in filtered" :key="t.id" :class="['thread', t.status, { detached: t.detached }]">
+      <div v-for="t in filtered" :key="t.id" :data-thread-id="t.id" :class="['thread', t.status, { detached: t.detached }]">
         <div class="anchor-desc" @click="$emit('locate', t)">{{ anchorDesc(t) }}</div>
         <div v-if="t.detached" class="quote">引用原文：{{ t.anchor.quote?.text ?? '（无）' }}</div>
         <div v-for="c in t.messages" :key="c.id" class="comment">

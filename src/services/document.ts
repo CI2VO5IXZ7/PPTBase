@@ -41,13 +41,15 @@ export class DocRequestError extends Error {
   code: string
   currentVersion?: number
   conflicts?: string[]
+  issues?: Record<string, unknown>
 
-  constructor(status: number, message: string, code = '', currentVersion?: number, conflicts?: string[]) {
+  constructor(status: number, message: string, code = '', currentVersion?: number, conflicts?: string[], issues?: Record<string, unknown>) {
     super(message)
     this.status = status
     this.code = code
     this.currentVersion = currentVersion
     this.conflicts = conflicts
+    this.issues = issues
   }
 }
 
@@ -79,6 +81,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       body?.error || '',
       issues?.currentVersion,
       Array.isArray(issues?.conflicts) ? issues.conflicts : undefined,
+      (body?.issues ?? undefined) as Record<string, unknown> | undefined,
     )
   }
   return body as T

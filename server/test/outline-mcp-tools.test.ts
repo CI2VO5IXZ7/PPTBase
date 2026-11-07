@@ -120,6 +120,37 @@ describe('大纲 MCP 工具注册（离线）', () => {
     expect(done.isError).toBeFalsy()
   })
 
+  it('add_comment/reply_comment 生产门：缺 sourceApprovalId 拒绝、带有效源放行', async () => {
+    const doc = await createDoc(ctx, alice.key, { title: 'mcp-comment-gate' })
+    await createOutline(ctx, alice.key, doc.docId)
+    const token = editTokenOf(ctx, doc.docId)
+    await ctx.app.inject({
+      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
+      headers: tokenHeader(token), payload: { baseVersion: 1, acknowledgeOpenThreads: true },
+    })
+    const begin = await callTool('begin_presentation_from_outline', { docId: doc.docId })
+    const approvalId = JSON.parse(begin.content[0].text!).approvalId as string
+    const slide = await callTool('add_slides', {
+      docId: doc.docId, slides: [{ id: 's1', elements: [] }], sourceApprovalId: approvalId,
+    })
+    expect(slide.isError).toBeFalsy()
+    const denied = await callTool('add_comment', { docId: doc.docId, slideId: 's1', content: 'x' })
+    expect(denied.isError).toBe(true)
+    expect(JSON.parse(denied.content[0].text!).message).toContain('确认来源')
+    const ok = await callTool('add_comment', {
+      docId: doc.docId, slideId: 's1', content: '带源批注', sourceApprovalId: approvalId,
+    })
+    expect(ok.isError).toBeFalsy()
+    const notes = await callTool('list_comments', { docId: doc.docId, onlyUnreplied: false })
+    const noteId = JSON.parse(notes.content[0].text!).slides[0].comments[0].id as string
+    const deniedReply = await callTool('reply_comment', { docId: doc.docId, slideId: 's1', noteId, content: 'r' })
+    expect(deniedReply.isError).toBe(true)
+    const okReply = await callTool('reply_comment', {
+      docId: doc.docId, slideId: 's1', noteId, content: '带源回复', sourceApprovalId: approvalId,
+    })
+    expect(okReply.isError).toBeFalsy()
+  })
+
   it('get_outline_asset 拒绝未引用/外链/他人资产', async () => {
     const doc = await createDoc(ctx, alice.key, { title: 'mcp-asset' })
     await createOutline(ctx, alice.key, doc.docId)
