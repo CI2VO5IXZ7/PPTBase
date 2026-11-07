@@ -5,6 +5,9 @@ import type { OutlineState } from '@/services/outline'
 
 export type OutlineSaveStatus = 'saved' | 'saving' | 'dirty' | 'offline' | 'conflict'
 
+// 草稿在 sessionStorage 的兜底副本（按 docId）：整页跳转/刷新后内存 localDraft 丢失时可恢复
+const draftKey = (docId: string) => `PPTIST_OUTLINE_DRAFT_${docId}`
+
 export interface OutlineStoreState {
   docId: string
   role: 'owner' | 'edit' | 'view' | ''
@@ -63,6 +66,14 @@ export const useOutlineStore = defineStore('outline', {
       this.status = state.status
       this.saveStatus = 'saved'
       this.conflictRemote = null
+      // 内存无草稿时从 sessionStorage 兜底恢复（整页跳转后仍有入口取回）
+      if (!this.localDraft && state.docId) {
+        try {
+          const raw = sessionStorage.getItem(draftKey(state.docId))
+          if (raw) this.localDraft = JSON.parse(raw)
+        }
+        catch { /* 损坏数据忽略 */ }
+      }
     },
     setVersions(version: number, contentVersion: number) {
       this.version = version
@@ -80,9 +91,14 @@ export const useOutlineStore = defineStore('outline', {
     // 冲突保护：保存本地正文与未提交 steps；任何时刻可显式取回/放弃
     stashDraft(content: Record<string, unknown>, steps: Record<string, unknown>[]) {
       this.localDraft = { content, steps, savedAt: Date.now() }
+      if (this.docId) {
+        try { sessionStorage.setItem(draftKey(this.docId), JSON.stringify(this.localDraft)) }
+        catch { /* 存储不可用/超限不阻塞同步流程 */ }
+      }
     },
     dropDraft() {
       this.localDraft = null
+      if (this.docId) sessionStorage.removeItem(draftKey(this.docId))
     },
     setConflict(remoteVersion: number, contentVersion: number) {
       this.saveStatus = 'conflict'

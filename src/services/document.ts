@@ -8,8 +8,25 @@ export interface DocData {
   slides: Slide[]
 }
 
+// GET /api/docs/:id 下发的大纲状态；generation 为当前制作来源（stale=true 表示已失效）
+export interface DocOutlineStatus {
+  version: number
+  contentVersion: number
+  pendingSubmissions: number
+  approvalActive: boolean
+  approvalValid: boolean
+  generation: {
+    approvalId: string
+    contentVersion: number
+    pptVersion: number
+    at: number
+    stale: boolean
+  } | null
+}
+
 export interface DocResponse extends DocData {
   hasOutline?: boolean
+  outline?: DocOutlineStatus
   outlineEditUrl?: string
   outlineViewUrl?: string
   id: string
@@ -92,11 +109,12 @@ export const getDoc = (id: string) => request<DocResponse>(`/api/docs/${id}`)
 // 大纲等服务复用同一凭证/错误处理的请求入口
 export const docRequest = request
 
-export const putDoc = (id: string, baseVersion: number, doc: DocData) =>
+// 制作门禁只拦 Agent 发起的改页；网页手动编辑不受限，有当前来源时顺带携带 sourceApprovalId
+export const putDoc = (id: string, baseVersion: number, doc: DocData, sourceApprovalId?: string) =>
   request<PutDocResult>(`/api/docs/${id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ baseVersion, doc }),
+    body: JSON.stringify({ baseVersion, doc, ...(sourceApprovalId ? { sourceApprovalId } : {}) }),
   })
 
 export const uploadAsset = async (id: string, file: File) => {

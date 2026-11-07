@@ -785,7 +785,7 @@ filter: brightness(108%) contrast(105%) blur(2px) opacity(92%);
 
 制作前大纲是受限 ProseMirror JSON（非 PPT 页面数据）。区块类型：`paragraph`、`heading(level 1-3)`、`bullet_list`/`ordered_list`/`list_item`（可嵌套）、`blockquote`、`horizontal_rule`、`image(src/alt/caption/usage/usageDescription)`、`hard_break`；内联标记 `strong`、`em`、`link(href/title)`。每个区块有稳定 `attrs.blockId`。
 
-批注锚点 `anchor` 四选一：`{kind:"document"}`、`{kind:"block",blockId}`、`{kind:"image",blockId}`、`{kind:"textRange",blockId,from,to,toBlockId?,quote?}`（from/to 为各区块内文本偏移）。区块被删后锚点转 `detached` 并保留原引用文本。
+批注锚点 `anchor` 四选一：`{kind:"document"}`、`{kind:"block",blockId}`、`{kind:"image",blockId}`、`{kind:"textRange",fragments:[{blockId,from,to}]}`（fragments 1–20 项，每项为某区块内一段文本选区，from/to 为该区块文本内容内偏移，不含边界 token）。存储态锚点由服务端补全：textRange 每个片段另存 `fromOffset`/`toOffset`/`text`/`detached?`；锚点级另有 `quote:{before,text,after}` 引用原文与 `createdContentVersion`；block/image 锚点另存当前 `pos`。片段或区块被删后转 `detached`，线程保留原引用文本。
 
 大纲操作（`edit_outline` 的 `ops` 每项）：
 - `{op:"insertBlocks", before?|after?, blocks:[...]}`（不带定位 = 追加）

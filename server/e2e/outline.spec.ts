@@ -506,10 +506,23 @@ test('10. 来源失效语义：正文/撤销 失效，评论 不失效', async (
   })
   const stale = await A.post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'setTitle', title: 'y' }], sourceApprovalId: approvalId })
   expect(stale.status()).toBe(409)
-  // 撤销确认 → 立即阻止后续写入
-  await api(request, server.baseUrl, tok(server.tokens(doc.docId).edit)).post(`/api/docs/${doc.docId}/outline/approval`, { baseVersion: cur.version + 1, acknowledgeOpenThreads: true })
-  await request.delete(`${server.baseUrl}/api/docs/${doc.docId}/outline/approval`, { headers: tok(server.tokens(doc.docId).edit) })
-  const revoked = await A.post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'setTitle', title: 'z' }] })
+  // 撤销确认 → 立即阻止后续写入（确认/撤销均需一次性凭证 X-Confirm-Token；
+  // 领票先走同源 Origin 的网页确认会话 X-Confirm-Session）
+  const editTok = server.tokens(doc.docId).edit
+  const session = (await (await api(request, server.baseUrl, { ...tok(editTok), origin: server.baseUrl })
+    .post(`/api/docs/${doc.docId}/outline/approval/session`, {})).json()).confirmSession as string
+  const ticketOf = async (action: 'approve' | 'revoke') =>
+    (await (await api(request, server.baseUrl, { ...tok(editTok), 'x-confirm-session': session }).post(`/api/docs/${doc.docId}/outline/approval/ticket`, { action })).json()).confirmToken as string
+  const reApprove = await api(request, server.baseUrl, { ...tok(editTok), 'x-confirm-token': await ticketOf('approve') }).post(`/api/docs/${doc.docId}/outline/approval`, { baseVersion: cur.version + 1, acknowledgeOpenThreads: true })
+  expect(reApprove.status()).toBe(200)
+  // 重新确认后 begin 建立制作来源：撤销前携源放行，撤销后同源立即失效
+  const begin2 = await callTool(mcp, 'begin_presentation_from_outline', { docId: doc.docId })
+  const approvalId2 = JSON.parse(textOf(begin2)).approvalId
+  const before = await A.post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'setTitle', title: 'z' }], sourceApprovalId: approvalId2 })
+  expect(before.status()).toBe(200)
+  const del = await request.delete(`${server.baseUrl}/api/docs/${doc.docId}/outline/approval`, { headers: { ...tok(editTok), 'x-confirm-token': await ticketOf('revoke') } })
+  expect(del.status()).toBe(200)
+  const revoked = await A.post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'setTitle', title: 'z2' }], sourceApprovalId: approvalId2 })
   expect(revoked.status()).toBe(409)
 })
 

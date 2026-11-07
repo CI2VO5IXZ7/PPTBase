@@ -185,9 +185,9 @@ test('4xx：回队首保留 + offline（不伪装已保存）', async () => {
 test('SSE 事件 → requestPull：有未提交/合成中挂起，安全时机返回 true', async () => {
   const calls: { steps: unknown[] }[] = []
   const transport = {
-    patch: (p: { steps: unknown[] }) => {
-      calls.push(p)
-      return Promise.resolve({ ok: true as const, version: 2, contentVersion: 2 })
+    patchSteps: (baseVersion: number, requestId: string, steps: StepJson[]) => {
+      calls.push({ steps })
+      return Promise.resolve({ version: 2, contentVersion: 2 })
     },
     getState: () => Promise.resolve({
       docId: 'd', version: 3, contentVersion: 3, title: '', content: null,

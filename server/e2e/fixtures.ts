@@ -44,6 +44,9 @@ async function startServer(): Promise<E2EServer> {
   const addr = app.server.address()
   const port = typeof addr === 'object' && addr ? addr.port : 0
   const baseUrl = `http://127.0.0.1:${port}`
+  // 页面实际跑在随机端口上：publicBaseUrl 必须与页面同源，
+  // 否则确认会话的同源 Origin 门禁会拒绝真实浏览器的领会话请求
+  config.publicBaseUrl = baseUrl
 
   const userId = nanoid(12)
   db.prepare('INSERT INTO users (id, name, status, created_at) VALUES (?, ?, ?, ?)')

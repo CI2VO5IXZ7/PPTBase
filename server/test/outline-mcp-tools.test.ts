@@ -7,7 +7,7 @@ import { buildMcpServer } from '../src/mcp/tools'
 import { createDocService } from '../src/docs/service'
 import { createOutlineService } from '../src/outline/service'
 import type { RenderQueue } from '../src/render/queue'
-import { createDoc, createOutline, createUser, editTokenOf, makeApp, tokenHeader, type TestContext } from './helpers'
+import { approveAsUser, createDoc, createOutline, createUser, editTokenOf, makeApp, tokenHeader, type TestContext } from './helpers'
 
 const OUTLINE_TOOLS = [
   'create_outline', 'get_outline', 'edit_outline', 'get_outline_feedback',
@@ -96,10 +96,7 @@ describe('大纲 MCP 工具注册（离线）', () => {
     const doc = await createDoc(ctx, alice.key, { title: 'mcp-flow' })
     await createOutline(ctx, alice.key, doc.docId)
     const token = editTokenOf(ctx, doc.docId)
-    await ctx.app.inject({
-      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
-      headers: tokenHeader(token), payload: { baseVersion: 1, acknowledgeOpenThreads: true },
-    })
+    await approveAsUser(ctx, doc.docId, token, { baseVersion: 1, acknowledgeOpenThreads: true })
     const begin = await callTool('begin_presentation_from_outline', { docId: doc.docId })
     const b = JSON.parse(begin.content[0].text!)
     expect(b.approvalId).toBeTruthy()
@@ -124,10 +121,7 @@ describe('大纲 MCP 工具注册（离线）', () => {
     const doc = await createDoc(ctx, alice.key, { title: 'mcp-comment-gate' })
     await createOutline(ctx, alice.key, doc.docId)
     const token = editTokenOf(ctx, doc.docId)
-    await ctx.app.inject({
-      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
-      headers: tokenHeader(token), payload: { baseVersion: 1, acknowledgeOpenThreads: true },
-    })
+    await approveAsUser(ctx, doc.docId, token, { baseVersion: 1, acknowledgeOpenThreads: true })
     const begin = await callTool('begin_presentation_from_outline', { docId: doc.docId })
     const approvalId = JSON.parse(begin.content[0].text!).approvalId as string
     const slide = await callTool('add_slides', {

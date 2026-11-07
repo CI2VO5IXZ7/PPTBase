@@ -26,10 +26,10 @@
       </div>
     </header>
 
-    <div v-if="outline.saveStatus === 'conflict'" class="banner conflict">
-      版本冲突：远端已到 v{{ outline.conflictRemote?.version }}（c{{ outline.conflictRemote?.contentVersion }}）。
+    <div v-if="outline.saveStatus === 'conflict' || outline.localDraft" class="banner conflict">
+      <template v-if="outline.saveStatus === 'conflict'">版本冲突：远端已到 v{{ outline.conflictRemote?.version }}（c{{ outline.conflictRemote?.contentVersion }}）。</template>
       本地未提交修改已保存为草稿（{{ draftSteps }} 步），不会自动丢弃。
-      <button class="btn" @click="onDiscardDraft">刷新为最新版本（保留草稿）</button>
+      <button v-if="outline.saveStatus === 'conflict'" class="btn" @click="onDiscardDraft">刷新为最新版本（保留草稿）</button>
       <button v-if="outline.localDraft" class="btn" @click="copyDraft">复制草稿内容</button>
       <button v-if="outline.localDraft" class="btn" @click="outline.dropDraft()">丢弃草稿</button>
     </div>
@@ -254,11 +254,18 @@ onMounted(async () => {
     outline.lastError = '大纲加载失败'
   }
 })
+// 卸载兜底：drain 最多等 3s，超时仍先存草稿再 destroy，不阻塞组件销毁
+const DRAIN_TIMEOUT_MS = 3000
 onBeforeUnmount(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
-  editorRef.value?.flushNow()
-  void sync.drain()
-  sync.destroy()
+  void (async () => {
+    editorRef.value?.flushNow()
+    await Promise.resolve() // 让 flushNow 同步 emit 的 steps 先进入队列
+    await Promise.race([sync.drain(), new Promise(resolve => setTimeout(resolve, DRAIN_TIMEOUT_MS))])
+    // drain 后仍剩未提交步骤：本地草稿+待处理步骤存 store 草稿，destroy 清队列不丢数据
+    if (sync.pendingCount()) sync.preservePending()
+    sync.destroy()
+  })()
 })
 </script>
 

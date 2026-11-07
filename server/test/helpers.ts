@@ -99,6 +99,47 @@ export async function createOutline(ctx: TestContext, key: string, docId: string
   return res
 }
 
+// 真人确认路径：网页端先持编辑令牌 + 同源 Origin 申请网页确认会话，
+// 再凭会话（X-Confirm-Session）申请一次性确认凭证，最后携带
+// X-Confirm-Token 调 approve/revoke（编辑令牌本体不能确认也不能领票）
+export async function confirmSession(ctx: TestContext, docId: string, token: string): Promise<string> {
+  const res = await ctx.app.inject({
+    method: 'POST',
+    url: `/api/docs/${docId}/outline/approval/session`,
+    headers: { ...tokenHeader(token), origin: ctx.config.publicBaseUrl },
+  })
+  if (res.statusCode !== 200) throw new Error(`confirmSession 失败: ${res.statusCode} ${res.body}`)
+  return (res.json() as { confirmSession: string }).confirmSession
+}
+
+export async function confirmTicket(ctx: TestContext, docId: string, token: string, action: 'approve' | 'revoke' = 'approve', session?: string): Promise<string> {
+  const res = await ctx.app.inject({
+    method: 'POST',
+    url: `/api/docs/${docId}/outline/approval/ticket`,
+    headers: { ...tokenHeader(token), 'x-confirm-session': session ?? await confirmSession(ctx, docId, token) },
+    payload: { action },
+  })
+  if (res.statusCode !== 200) throw new Error(`confirmTicket 失败: ${res.statusCode} ${res.body}`)
+  return (res.json() as { confirmToken: string }).confirmToken
+}
+
+export async function approveAsUser(ctx: TestContext, docId: string, token: string, payload: Record<string, unknown>, ticket?: string) {
+  return ctx.app.inject({
+    method: 'POST',
+    url: `/api/docs/${docId}/outline/approval`,
+    headers: { ...tokenHeader(token), 'x-confirm-token': ticket ?? await confirmTicket(ctx, docId, token, 'approve') },
+    payload,
+  })
+}
+
+export async function revokeAsUser(ctx: TestContext, docId: string, token: string, ticket?: string) {
+  return ctx.app.inject({
+    method: 'DELETE',
+    url: `/api/docs/${docId}/outline/approval`,
+    headers: { ...tokenHeader(token), 'x-confirm-token': ticket ?? await confirmTicket(ctx, docId, token, 'revoke') },
+  })
+}
+
 // 大纲正文 JSON 构造工具（blockId 可在测试中显式指定，服务端也会归一化补齐）
 export function para(id: string, text: string) {
   return {

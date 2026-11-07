@@ -131,6 +131,26 @@ export interface OutlineSubmissionRow {
   handled_at: number | null
 }
 
+export type OutlineConfirmAction = 'approve' | 'revoke'
+
+export interface OutlineConfirmSessionRow {
+  id: string
+  doc_id: string
+  token_hash: string
+  expires_at: number
+  created_at: number
+}
+
+export interface OutlineConfirmTicketRow {
+  id: string
+  doc_id: string
+  action: OutlineConfirmAction
+  token_hash: string
+  expires_at: number
+  used_at: number | null
+  created_at: number
+}
+
 export type OutlineApprovalStatus = 'active' | 'revoked' | 'superseded'
 
 export interface OutlineApprovalRow {
@@ -226,6 +246,24 @@ export const MIGRATIONS: string[] = [
   CREATE UNIQUE INDEX outline_approvals_request ON outline_approvals(doc_id, request_id)
     WHERE request_id IS NOT NULL;
   CREATE INDEX outline_approvals_doc ON outline_approvals(doc_id, created_at);
+  `,
+  // v5：一次性大纲确认凭证——编辑令牌只能读/写大纲内容，
+  // 确认/撤销必须另持服务端下发、绑定动作、限时且用完即废的凭证
+  `
+  CREATE TABLE outline_confirm_tickets (id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    action TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+    expires_at INTEGER NOT NULL, used_at INTEGER, created_at INTEGER NOT NULL);
+  CREATE INDEX outline_confirm_tickets_expiry ON outline_confirm_tickets(expires_at);
+  `,
+  // v6：网页确认会话——领确认票与编辑令牌脱钩：会话只签发给同源
+  // 浏览器页面（路由层校验 Origin），领票必须另持有效会话
+  `
+  CREATE TABLE outline_confirm_sessions (id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    token_hash TEXT UNIQUE NOT NULL,
+    expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL);
+  CREATE INDEX outline_confirm_sessions_expiry ON outline_confirm_sessions(expires_at);
   `,
 ]
 

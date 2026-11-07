@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { auth, createDoc, createOutline, createUser, editTokenOf, makeApp, PNG_DATA_URL, tokenHeader, type TestContext } from './helpers'
+import { approveAsUser, auth, createDoc, createOutline, createUser, editTokenOf, makeApp, PNG_DATA_URL, tokenHeader, type TestContext } from './helpers'
 
 describe('大纲 MCP（真实 HTTP，需单独批准运行）', () => {
   let ctx: TestContext
@@ -111,10 +111,7 @@ describe('大纲 MCP（真实 HTTP，需单独批准运行）', () => {
     expect(blocked.body.message).toContain('确认来源')
 
     const token = editTokenOf(ctx, doc.docId)
-    await ctx.app.inject({
-      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
-      headers: tokenHeader(token), payload: { baseVersion: 1, acknowledgeOpenThreads: true },
-    })
+    await approveAsUser(ctx, doc.docId, token, { baseVersion: 1, acknowledgeOpenThreads: true })
     const begin = await callJson('begin_presentation_from_outline', { docId: doc.docId })
     const ok = await callJson('add_slides', { docId: doc.docId, slides: [{ id: 's', elements: [] }], sourceApprovalId: begin.body.approvalId })
     expect(ok.isError).toBe(false)

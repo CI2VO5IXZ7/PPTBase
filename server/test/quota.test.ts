@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { auth, createDoc, createUser, editTokenOf, makeApp, textElement, tokenHeader, type TestContext } from './helpers'
+import { approveAsUser, auth, createDoc, createUser, editTokenOf, makeApp, textElement, type TestContext } from './helpers'
 
 let ctx: TestContext
 let alice: { userId: string, key: string }
@@ -66,11 +66,7 @@ describe('大纲配额', () => {
 
     // PPT 写入同样受合计预算限制（有大纲 → 先拿到制作来源再过门禁）
     const token = editTokenOf(ctx, doc.docId)
-    await ctx.app.inject({
-      method: 'POST', url: `/api/docs/${doc.docId}/outline/approval`,
-      headers: tokenHeader(token),
-      payload: { baseVersion: 1, acknowledgeOpenThreads: true },
-    })
+    await approveAsUser(ctx, doc.docId, token, { baseVersion: 1, acknowledgeOpenThreads: true })
     const gen = await ctx.app.inject({
       method: 'POST', url: `/api/docs/${doc.docId}/outline/generation`,
       headers: auth(alice.key), payload: {},

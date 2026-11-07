@@ -38,7 +38,9 @@ npm start            # node dist/index.js
 | `POST /api/docs/:id/outline/feedback` | edit token | 用户提交一轮反馈（不可变 gzip 快照），幂等去重 |
 | `GET /api/docs/:id/outline/feedback[?id&status&cursor&limit]` | owner Key | 轮次列表/单轮快照，`hasMore`/`nextCursor` |
 | `POST /api/docs/:id/outline/feedback/:id/complete` | owner Key | 标记该轮处理完成（不影响其他轮次，不解决批注） |
-| `POST/DELETE /api/docs/:id/outline/approval` | edit token | 用户确认/撤销（快照绑定 `contentVersion`；有未解决批注需 `acknowledgeOpenThreads`） |
+| `POST /api/docs/:id/outline/approval/session` | edit token + 同源 `Origin` | 签发网页确认会话（10 分钟；`Origin` 的 origin 必须等于 `PUBLIC_BASE_URL` 的 origin，服务端只存散列） |
+| `POST /api/docs/:id/outline/approval/ticket` | edit token + `X-Confirm-Session` | 凭网页会话申请一次性确认凭证（绑定 `action=approve|revoke`，5 分钟有效，用完即废） |
+| `POST/DELETE /api/docs/:id/outline/approval` | edit token + `X-Confirm-Token` | 用户确认/撤销（快照绑定 `contentVersion`；有未解决批注需 `acknowledgeOpenThreads`）；仅编辑令牌不能确认 |
 | `POST /api/docs/:id/outline/generation` | owner Key | Agent 校验确认有效后发 `approvalId`+`contentVersion`+`pptVersion` |
 
 ### MCP 大纲工具（同一 `/mcp`，同一 Key）
@@ -49,7 +51,8 @@ npm start            # node dist/index.js
 
 - 表：`outlines`（当前正文+线程+双版本）、`outline_revisions`（版本流水 gzip）、`outline_submissions`/`outline_approvals`（不可变 gzip 快照，各计两份配额）。
 - `version` 任何写入 +1；`contentVersion` 仅正文/图片/用途变化 +1——批注不会使确认失效。
-- 制作门禁：有大纲时 Agent 写页面（MCP 全部写工具 + REST `ops`/`patch`/`PUT`）必须带有效 `sourceApprovalId`，在服务层统一校验；未确认/未 begin/已撤销/正文已变 → 409 `production_source_required` 及下一步提示。编辑令牌用户与无大纲旧文档不受影响。
+- 制作门禁：有大纲时 Agent 发起的写页面请求（MCP 全部写工具 + REST `ops`/`patch`/`PUT`，按凭证判定：API Key → agent）必须带有效 `sourceApprovalId`，在服务层统一校验；未确认/未 begin/已撤销/正文已变 → 409 `production_source_required` 及下一步提示。持编辑令牌的网页手动编辑（author=user）不受门禁限制，记为用户变更；网页端仍从 `GET /api/docs/:id` 的 `outline.generation.approvalId` 取当前来源并随 PUT 顺带携带。门禁区分凭证类型（API Key vs 编辑令牌），不宣称识别真人身份；无大纲旧文档不受影响。
+- 确认门禁边界：确认链路为「编辑令牌 → 同源网页会话 → 一次性确认票」三段，挡住的是 Agent 经常规 MCP/REST 路径顺手代确认（常规 Agent 请求不带浏览器 `Origin`）。文档编辑令牌是会话凭证，不是实名审批身份；持完整凭证者仍可自行伪造 `Origin` 头，本门禁不宣称抵御该情形。
 - 图片隐私：`/assets/{id}.{ext}` 为公开不可猜测地址（无鉴权）；`get_outline_asset` 只做所有者+引用校验，不替代 URL 保密性。资产按所有者保留，**不随文档删除**。
 - 升级/恢复：v4 迁移自动执行；备份 `app.db` + `assets/`；配额合计 PPT+大纲+快照字节。
 

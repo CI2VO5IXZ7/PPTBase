@@ -107,6 +107,11 @@ export const outlineApprovalSchema = z.looseObject({
   acknowledgeOpenThreads: z.boolean().optional(),
 })
 
+// 一次性确认凭证申请：绑定 approve/revoke 动作
+export const outlineConfirmTicketSchema = z.looseObject({
+  action: z.enum(['approve', 'revoke']),
+})
+
 export function issuesOf(error: z.ZodError): ValidationIssue[] {
   return error.issues.map(issue => ({
     path: issue.path.map(seg => typeof seg === 'number' ? `[${seg}]` : String(seg)).join('.') || '(root)',
@@ -238,5 +243,6 @@ export type OutlineOpsBody = z.infer<typeof outlineOpsSchema>
 export type OutlinePatchBody = z.infer<typeof outlinePatchSchema>
 export type OutlineFeedbackBody = z.infer<typeof outlineFeedbackSchema>
 export type OutlineApprovalBody = z.infer<typeof outlineApprovalSchema>
+export type OutlineConfirmTicketBody = z.infer<typeof outlineConfirmTicketSchema>
 export type OutlineCompleteBody = z.infer<typeof outlineCompleteSchema>
 export type OutlineInitBody = z.infer<typeof outlineInitSchema>

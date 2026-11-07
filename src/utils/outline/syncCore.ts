@@ -56,7 +56,11 @@ export interface SyncEvents {
   onRemoteState?(state: OutlineStateSnapshot): void
 }
 
-const RETRY_DELAY_MS = 0 // 测试可控；外层可包 setTimeout
+// drain 失败重试退避：真实间隔，连续失败线性增长并封顶，不做 0ms 空转
+const RETRY_DELAY_MS = 300
+const RETRY_DELAY_MAX_MS = 2000
+// drain 总耗时上限：超时立即返回 false，不跑满 maxRounds
+const DRAIN_MAX_WAIT_MS = 10_000
 
 export class OutlineSyncCore {
   readonly queue = new StepsQueue()
@@ -71,7 +75,8 @@ export class OutlineSyncCore {
   setBuffered(v: boolean) { this.buffered = v }
   // 输入中/IME 期间收到的远端更新挂起
   remotePullPending = false
-  private flushing = false
+  // 在途 flush Promise：并发调用共享同一结果，不当作失败
+  private inflightFlush: Promise<boolean> | null = null
   private currentDoc: Record<string, unknown> | null = null
   private transport: SyncTransport
   private events: SyncEvents
@@ -107,9 +112,20 @@ export class OutlineSyncCore {
     return { accepted: true }
   }
 
-  // 主写循环：优先重试 in-flight（同 requestId+payload+baseVersion），否则取新批
+  // 主写循环入口：已有 flush 在途时并发调用等待同一结果（不算失败），否则执行一轮
   async flush(): Promise<boolean> {
-    if (this.flushing) return false
+    if (this.inflightFlush) return this.inflightFlush
+    this.inflightFlush = this.runFlush()
+    try {
+      return await this.inflightFlush
+    }
+    finally {
+      this.inflightFlush = null
+    }
+  }
+
+  // 主写循环：优先重试 in-flight（同 requestId+payload+baseVersion），否则取新批
+  private async runFlush(): Promise<boolean> {
     // 取批：in-flight 优先（幂等重试）；否则新批次（新 requestId，不含后续新输入）
     let batch: StepJson[] | null = null
     let rid = ''
@@ -123,7 +139,6 @@ export class OutlineSyncCore {
     }
     if (!batch || !batch.length) return true
 
-    this.flushing = true
     this.setStatus('saving')
     const baseVersion = this.version
     const baseContentVersion = this.contentVersion
@@ -171,22 +186,28 @@ export class OutlineSyncCore {
         this.setStatus('offline', e.message || '网络错误，恢复后自动重试')
       }
     }
-    finally {
-      this.flushing = false
-    }
     return done
   }
 
-  // 排空：提交/确认/导航前调用；冲突或持续失败返回 false
-  async drain(maxRounds = 40): Promise<boolean> {
+  // 排空：提交/确认/导航前调用；冲突、超时或持续失败返回 false。
+  // flush 在途时等待其完成再判断结果；失败重试带真实退避间隔，不做 0ms 空转
+  async drain(maxRounds = 40, maxWaitMs = DRAIN_MAX_WAIT_MS): Promise<boolean> {
+    const start = Date.now()
+    let failures = 0
     for (let i = 0; i < maxRounds; i++) {
       if (!this.queue.size) return true
       if (this.status === 'conflict') return false
+      // 总耗时超上限立即返回 false，不跑满 maxRounds
+      if (Date.now() - start >= maxWaitMs) return false
       const ok = await this.flush()
       if (!ok && (this.status as string) === 'conflict') return false
       if (!ok) {
-        await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+        // 连续失败线性退避（封顶 RETRY_DELAY_MAX_MS），成功后复位
+        failures++
+        if (Date.now() - start >= maxWaitMs) return false
+        await new Promise(r => setTimeout(r, Math.min(RETRY_DELAY_MS * failures, RETRY_DELAY_MAX_MS)))
       }
+      else failures = 0
     }
     return !this.queue.size
   }
@@ -238,6 +259,13 @@ export class OutlineSyncCore {
 
   dropDraft() {
     this.localDraft = null
+  }
+
+  // 销毁/卸载前兜底：仍待提交的 steps + 当前本地正文快照，供外层存草稿（清队列不丢数据）
+  snapshotPendingDraft(): { content: Record<string, unknown> | null, steps: StepJson[] } | null {
+    const steps = this.queue.snapshotAll()
+    if (!steps.length) return null
+    return { content: this.currentDoc ?? this.localDraft?.content ?? null, steps }
   }
 
   // SSE 远端事件入口：有未提交 steps/in-flight 或合成中 → 挂起，flush/合成结束后补拉；

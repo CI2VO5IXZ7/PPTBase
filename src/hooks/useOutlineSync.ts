@@ -16,6 +16,8 @@ export default function useOutlineSync() {
   const documentStore = useDocumentStore()
 
   let initialized = false
+  // 在途初始化 Promise：并发 init 共享同一次结果，避免重复拉取/订阅
+  let initPromise: Promise<void> | null = null
   let flushTimer: ReturnType<typeof setTimeout> | null = null
   let unsubscribe: (() => void) | null = null
   let composing = false
@@ -125,24 +127,46 @@ export default function useOutlineSync() {
     outline.conflictRemote = null
   }
 
-  const init = async () => {
-    if (initialized) return
-    initialized = true
+  // 只有全部成功才置 initialized；失败清理已挂订阅/定时器，保持可重试
+  const init = () => {
+    if (initialized) return Promise.resolve()
+    initPromise ??= doInit().finally(() => { initPromise = null })
+    return initPromise
+  }
+
+  const doInit = async () => {
     setDocToken(documentStore.token)
-    await core.pull(true)
-    await loadSubmissions()
-    unsubscribe = subscribe(
-      documentStore.docId,
-      () => undefined,
-      // outline 事件（含自身 PATCH 的服务端映射回执）：未提交/合成中置延迟标记，安全后补拉
-      () => {
-        if (core.requestPull(composing)) void core.pull(true)
-      },
-      // 断线重连：独立 GET 补拉，不依赖事件回放
-      () => {
-        void core.pull(true)
-      },
-    )
+    try {
+      await core.pull(true)
+      await loadSubmissions()
+      unsubscribe = subscribe(
+        documentStore.docId,
+        () => undefined,
+        // outline 事件（含自身 PATCH 的服务端映射回执）：未提交/合成中置延迟标记，安全后补拉
+        () => {
+          if (core.requestPull(composing)) void core.pull(true)
+        },
+        // 断线重连：独立 GET 补拉，不依赖事件回放
+        () => {
+          void core.pull(true)
+        },
+      )
+    }
+    catch (err) {
+      // 初始化失败：清掉已挂上的订阅与定时器，复位后下次 init 可干净重试
+      unsubscribe?.()
+      unsubscribe = null
+      if (flushTimer) clearTimeout(flushTimer)
+      flushTimer = null
+      throw err
+    }
+    initialized = true
+  }
+
+  // destroy 前兜底：drain 未排空的未提交 steps 连同本地正文存为 store 草稿，清队列也不丢数据
+  const preservePending = () => {
+    const d = core.snapshotPendingDraft()
+    if (d) outline.stashDraft(d.content ?? outline.content ?? {}, d.steps)
   }
 
   const destroy = () => {
@@ -159,6 +183,6 @@ export default function useOutlineSync() {
 
   return {
     init, destroy, flush, drain, scheduleFlush, refresh, resolveConflict,
-    enqueueSteps, hasUnsavedChanges, pendingCount, setComposing, trackEditorDoc,
+    enqueueSteps, hasUnsavedChanges, pendingCount, preservePending, setComposing, trackEditorDoc,
   }
 }

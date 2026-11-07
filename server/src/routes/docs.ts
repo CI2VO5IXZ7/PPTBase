@@ -89,15 +89,14 @@ export function docsRoutes({ db, config, service, outline }: DocsRoutesDeps): Fa
 
     app.put('/api/docs/:id', req => {
       const access = resolveDocAccess(db, config, req, docId(req))
-      if (access.role !== 'edit') {
-        if (access.role === 'view') throw AppError.forbidden('只读链接不能修改文档')
-        throw AppError.notFound()
-      }
-      const body = req.body as { baseVersion?: number, doc?: unknown }
+      // owner（API Key）与 edit（编辑令牌）都可写；view 只读拒绝。
+      // Agent 走 PUT 时由 putDoc 内的制作门禁按 author=agent 拦截
+      if (access.role === 'view') throw AppError.forbidden('只读链接不能修改文档')
+      const body = req.body as { baseVersion?: number, doc?: unknown, sourceApprovalId?: string }
       if (!body || typeof body.baseVersion !== 'number' || body.doc === undefined) {
         throw AppError.validation('请求体需要 baseVersion 和 doc')
       }
-      const result = service.putDoc(access, docId(req), body.baseVersion, body.doc)
+      const result = service.putDoc(access, docId(req), body.baseVersion, body.doc, body.sourceApprovalId)
       return { version: result.version, merged: result.merged, normalized: result.normalized }
     })
 

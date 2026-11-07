@@ -3,6 +3,7 @@
 // 所有写路径共用同一流水线：校验 → 应用 transforms → blockId 归一化 →
 // data: 图片转存 → 约束/所有权检查 → 锚点映射 → 原子事务 → 提交后 SSE。
 
+import { createHash, randomBytes } from 'node:crypto'
 import { gunzipSync, gzipSync } from 'node:zlib'
 import { nanoid } from 'nanoid'
 import type { Node as PMNode } from 'prosemirror-model'
@@ -31,6 +32,9 @@ import type {
   Db,
   DocumentRow,
   OutlineApprovalRow,
+  OutlineConfirmAction,
+  OutlineConfirmSessionRow,
+  OutlineConfirmTicketRow,
   OutlineRevisionRow,
   OutlineRow,
   OutlineSubmissionRow,
@@ -43,6 +47,10 @@ import { applyContentOps, isContentOp } from './ops'
 import { requestHash, validateJsonAttrs, validateOutlineDoc, type OutlineApprovalBody, type OutlineCompleteBody, type OutlineFeedbackBody, type OutlineInitBody, type OutlineOpsBody, type OutlinePatchBody } from './schema'
 
 const SNAPSHOT_KEEP = 100
+// 一次性确认凭证有效期：覆盖「点确认→弹窗→再点」的真人操作时长
+const CONFIRM_TICKET_TTL_MS = 5 * 60 * 1000
+// 网页确认会话有效期：覆盖一次大纲页会话内的多次确认/撤销操作
+const CONFIRM_SESSION_TTL_MS = 10 * 60 * 1000
 
 export interface OutlineServiceDeps {
   db: Db
@@ -324,6 +332,38 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
     return summary
   }
 
+  // 网页确认会话校验：领确认票必须另持有效会话（缺失/不属于该文档/已过期
+  // 一律 403）。会话由路由层同源 Origin 门禁签发，把「能写大纲的编辑令牌」
+  // 与「能发起确认的网页页面」拆成两条凭证链，堵住 Agent 持 #t= 编辑链接
+  // 经常规 REST 路径顺手领票代确认。边界（plan 5.3）：这是产品工作流保障，
+  // 令牌不是实名审批身份，不宣称抵御持完整凭证者自行伪造 Origin。
+  function requireConfirmSession(docId: string, token: string | undefined): void {
+    if (!token) throw AppError.forbidden('申请确认凭证需要网页确认会话（X-Confirm-Session）')
+    const hash = createHash('sha256').update(token).digest('hex')
+    const row = db.prepare('SELECT * FROM outline_confirm_sessions WHERE token_hash = ?').get(hash) as OutlineConfirmSessionRow | undefined
+    if (!row || row.doc_id !== docId) throw AppError.forbidden('确认会话无效，请刷新页面后重试')
+    if (row.expires_at <= Date.now()) throw AppError.forbidden('确认会话已过期，请刷新页面后重试')
+  }
+
+  // 一次性确认凭证分两步：check 在写事务前做只读校验（凭证缺失/动作不匹配/
+  // 已用/过期一律 403，先于版本冲突等业务前置检查返回），consume 在写事务内
+  // 原子置位 used_at —— 校验失败抛错 → 事务回滚、凭证不消耗；成功 → 不可重用。
+  function checkConfirmTicket(docId: string, action: OutlineConfirmAction, token: string): string {
+    const hash = createHash('sha256').update(token).digest('hex')
+    const row = db.prepare('SELECT * FROM outline_confirm_tickets WHERE token_hash = ?').get(hash) as OutlineConfirmTicketRow | undefined
+    if (!row || row.doc_id !== docId || row.action !== action) {
+      throw AppError.forbidden('确认凭证无效或与本次操作不匹配')
+    }
+    if (row.used_at !== null) throw AppError.forbidden('确认凭证已使用，请重新操作')
+    if (row.expires_at <= Date.now()) throw AppError.forbidden('确认凭证已过期，请重新操作')
+    return row.id
+  }
+
+  function consumeConfirmTicket(ticketId: string): void {
+    const res = db.prepare('UPDATE outline_confirm_tickets SET used_at = ? WHERE id = ? AND used_at IS NULL').run(Date.now(), ticketId)
+    if (!res.changes) throw AppError.forbidden('确认凭证已使用，请重新操作')
+  }
+
   function outlineState(docId: string) {
     const row = mustGetOutline(docId)
     const pending = db.prepare(
@@ -592,8 +632,39 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
       return { submission: toSubmission(updated), deduplicated: false }
     },
 
-    // 用户确认当前已保存内容（编辑令牌角色）；未解决批注需显式确认
-    approve(access: DocAccess, docId: string, body: OutlineApprovalBody) {
+    // 签发网页确认会话（编辑令牌角色 + 路由层同源 Origin 校验）：
+    // 服务端只存散列；有效期内可多次领确认票，票本身仍一次性
+    mintConfirmSession(docId: string) {
+      mustGetOutline(docId)
+      const now = Date.now()
+      // 惰性清理过期会话，不加定时器
+      db.prepare('DELETE FROM outline_confirm_sessions WHERE expires_at <= ?').run(now)
+      const token = randomBytes(32).toString('base64url')
+      const expiresAt = now + CONFIRM_SESSION_TTL_MS
+      db.prepare(
+        'INSERT INTO outline_confirm_sessions (id, doc_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?)'
+      ).run(nanoid(16), docId, createHash('sha256').update(token).digest('hex'), expiresAt, now)
+      return { confirmSession: token, expiresAt }
+    },
+
+    // 申请一次性确认凭证（编辑令牌角色 + 有效网页确认会话）。令牌本身不能确认：
+    // approve/revoke 必须携带这里下发、绑定动作、限时且用完即废的凭证
+    mintConfirmTicket(docId: string, action: OutlineConfirmAction, sessionToken: string | undefined) {
+      mustGetOutline(docId)
+      requireConfirmSession(docId, sessionToken)
+      const now = Date.now()
+      // 惰性清理过期凭证，不加定时器
+      db.prepare('DELETE FROM outline_confirm_tickets WHERE expires_at <= ?').run(now)
+      const token = randomBytes(32).toString('base64url')
+      const expiresAt = now + CONFIRM_TICKET_TTL_MS
+      db.prepare(
+        'INSERT INTO outline_confirm_tickets (id, doc_id, action, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).run(nanoid(16), docId, action, createHash('sha256').update(token).digest('hex'), expiresAt, now)
+      return { confirmToken: token, expiresAt }
+    },
+
+    // 用户确认当前已保存内容（编辑令牌角色＋一次性确认凭证）；未解决批注需显式确认
+    approve(access: DocAccess, docId: string, body: OutlineApprovalBody, confirmToken: string) {
       const row = mustGetOutline(docId)
       const hash = requestHash('approval', { baseVersion: body.baseVersion, ack: !!body.acknowledgeOpenThreads })
       if (body.requestId) {
@@ -605,6 +676,9 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
           return { approval: toApproval(existing), deduplicated: true }
         }
       }
+      // 凭证校验先于 baseVersion/批注冲突检查：凭证无效统一 403（幂等重放除外，
+      // 上面的 requestId 去重先命中，此时凭证已在首次请求中核销）
+      const ticketId = checkConfirmTicket(docId, 'approve', confirmToken)
       if (body.baseVersion !== row.version) {
         throw AppError.conflict('大纲有未保存或更新的内容，请先同步到最新版本再确认', { currentVersion: row.version })
       }
@@ -624,6 +698,7 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
       const version = row.version + 1
 
       const write = db.transaction(() => {
+        consumeConfirmTicket(ticketId)
         db.prepare(`UPDATE outline_approvals SET status = 'superseded' WHERE doc_id = ? AND status = 'active'`).run(docId)
         db.prepare(
           `INSERT INTO outline_approvals (id, doc_id, version, content_version, snapshot, status, open_threads, acknowledged_open_threads, request_id, request_hash, created_at)
@@ -648,8 +723,9 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
     },
 
     // 用户撤销当前确认：保留历史，同时停止依赖它的制作来源
-    revokeApproval(access: DocAccess, docId: string) {
+    revokeApproval(access: DocAccess, docId: string, confirmToken: string) {
       const row = mustGetOutline(docId)
+      const ticketId = checkConfirmTicket(docId, 'revoke', confirmToken)
       if (!row.active_approval_id) throw AppError.conflict('当前没有有效的确认可撤销')
       const approval = db.prepare('SELECT * FROM outline_approvals WHERE id = ?').get(row.active_approval_id) as OutlineApprovalRow | undefined
       if (!approval || approval.status !== 'active') throw AppError.conflict('当前没有有效的确认可撤销')
@@ -657,6 +733,7 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
       const version = row.version + 1
       const now = Date.now()
       const write = db.transaction(() => {
+        consumeConfirmTicket(ticketId)
         db.prepare(`UPDATE outline_approvals SET status = 'revoked', revoked_at = ? WHERE id = ?`).run(now, approval.id)
         const res = db.prepare(
           `UPDATE outlines SET version = ?, updated_at = ?, active_approval_id = NULL,
@@ -742,6 +819,8 @@ export function createOutlineService({ db, config }: OutlineServiceDeps) {
         pendingSubmissions: pending.n,
         approvalActive: approval?.status === 'active',
         approvalValid: approval?.status === 'active' && approval.content_version === row.content_version,
+        // 制作来源：GET /api/docs/:id 下发给网页端，PUT 自动保存据此携带 sourceApprovalId
+        generation: row.gen_approval_id ? generationState(row) : null,
       }
     },
 
