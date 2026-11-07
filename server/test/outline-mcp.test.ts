@@ -125,7 +125,7 @@ describe('大纲 MCP（真实 HTTP，需单独批准运行）', () => {
       payload: { baseVersion: await outlineVersion(doc.docId), ops: [{ op: 'insertBlocks', blocks: [{ type: 'paragraph', attrs: { blockId: 'y' }, content: [{ type: 'text', text: 'changed' }] }] }] },
     })
     expect(opsR.statusCode).toBe(200)
-        const stale = await callJson('add_slides', { docId: doc.docId, slides: [{ id: 's2', elements: [] }], sourceApprovalId: begin.body.approvalId })
+    const stale = await callJson('add_slides', { docId: doc.docId, slides: [{ id: 's2', elements: [] }], sourceApprovalId: begin.body.approvalId })
     expect(stale.isError).toBe(true)
 
     // 无大纲旧项目：无来源也直通
@@ -150,7 +150,7 @@ describe('大纲 MCP（真实 HTTP，需单独批准运行）', () => {
     })
     expect(imgOps.statusCode).toBe(200)
     const got = await client.callTool({ name: 'get_outline_asset', arguments: { docId: doc.docId, assetId: asset.id } })
-        const block = (got.content as { type: string }[])[0]
+    const block = (got.content as { type: string }[])[0]
     expect(block.type).toBe('image')
     const denied = await callJson('get_outline_asset', { docId: doc.docId, assetId: 'foreign-asset-id' })
     expect(denied.isError).toBe(true)

@@ -214,3 +214,33 @@ test('SSE 事件 → requestPull：有未提交/合成中挂起，安全时机�
   assert.equal(core.remotePullPending, true)
   await flushing
 })
+
+// 10. deferred pull：远端正文已变 → 不推进版本，直接 conflict 保草稿；仅元数据变 → 版本可前进
+test('pull deferred：正文已变 → conflict+草稿，版本不盲推进；元数据变 → 版本前进', async () => {
+  const base: OutlineStateSnapshot = { version: 1, contentVersion: 1, content: { type: 'doc' }, threads: [], status: null }
+  const { transport, calls } = fakeTransport(() => Promise.resolve(okWrite(2, 2)))
+  transport.setRemote(base)
+  const events: string[] = []
+  const core = new OutlineSyncCore(transport, { onConflict: () => events.push('conflict') }, rid)
+  assert.equal(await core.pull(true), 'applied') // 初始化基线 v1/cv1
+  core.enqueue([{ stepType: 'replace' }])
+  transport.setRemote({ version: 5, contentVersion: 3, content: { type: 'doc' }, threads: [], status: null })
+  assert.equal(calls.length, 0)
+  // 远端正文已变（cv 1→3），本地有未提交 → conflict，version 不推进
+  assert.equal(await core.pull(true), 'deferred')
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 1, '版本不得在未验证 contentVersion 下盲推进到 5')
+  assert.deepEqual(events, ['conflict'])
+  assert.ok(core.localDraft, '本地草稿必须保留供复制取回')
+
+  // 仅元数据推进（contentVersion 不变）：deferred 但版本可安全前进
+  const t2 = fakeTransport(() => Promise.resolve(okWrite(2, 1)))
+  t2.transport.setRemote(base)
+  const c2 = new OutlineSyncCore(t2.transport, {}, rid)
+  assert.equal(await c2.pull(true), 'applied')
+  c2.enqueue([{ stepType: 'replace' }])
+  t2.transport.setRemote({ version: 7, contentVersion: 1, content: { type: 'doc' }, threads: [], status: null })
+  assert.equal(await c2.pull(true), 'deferred')
+  assert.equal(c2.status, 'dirty')
+  assert.equal(c2.version, 7)
+})

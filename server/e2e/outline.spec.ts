@@ -41,14 +41,16 @@ test('1. Agent 链接打开无幻灯片大纲，不陷入初始化', async ({ se
   const doc = await server.createDoc('empty')
   await api(page.request, server.baseUrl, bearer(server.apiKey))
     .post(`/api/docs/${doc.docId}/outline`, {})
-  await outlinePage(doc.docId)
+  const p = await outlinePage(doc.docId)
   await expect(page.locator('.outline-editor .ProseMirror')).toBeVisible()
   await expect(page.locator('text=数据初始化中')).not.toBeVisible({ timeout: 3_000 }).catch(() => undefined)
   await expect(page.locator('.outline-header .title')).toContainText('大纲协作')
+  const SHOTS = process.env.PPTBASE_E2E_OUT ?? '/home/dev/worklogs/pptbase-outlines/authorized-extra-round/playwright-results'
+  await p.screenshot({ path: `${SHOTS}/../screenshots/case1-major-flow.png`, fullPage: true })
 })
 
 // ── 例2：格式/列表/中文输入(IME 事件)/粘贴/撤销重做/图片用途，保存刷新不丢 ──
-test('2. 编辑+IME+撤销重做保存后刷新不丢', async ({ server, page, outlinePage }) => {
+test('2. 编辑+IME+撤销重做保存后刷新不丢', async ({ server, page, outlinePage, request }) => {
   const doc = await server.createDoc('edit')
   await api(page.request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
@@ -67,6 +69,27 @@ test('2. 编辑+IME+撤销重做保存后刷新不丢', async ({ server, page, o
     el.dispatchEvent(new Ctor('compositionend', { data: '中' }))
   })
   await p.keyboard.type('中文大纲')
+  // 合成中真实输入 + 远端更新：composition 期间远端新增批注（元数据），补拉后本地输入保留
+  const A = api(request, server.baseUrl, bearer(server.apiKey))
+  await p.locator('.ProseMirror').evaluate(el => {
+    const win = (el.ownerDocument?.defaultView ?? globalThis) as { CompositionEvent?: new (t: string, i: { data?: string }) => Event }
+    el.dispatchEvent(new (win.CompositionEvent ?? Event)('compositionstart', { data: '' }))
+  })
+  const cur2 = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  const rc = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: cur2.version,
+    ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: '合成期远端批注' }],
+  })
+  expect(rc.status()).toBe(200)
+  await p.keyboard.type('合成中保留')
+  await p.locator('.ProseMirror').evaluate(el => {
+    const win = (el.ownerDocument?.defaultView ?? globalThis) as { CompositionEvent?: new (t: string, i: { data?: string }) => Event }
+    el.dispatchEvent(new (win.CompositionEvent ?? Event)('compositionend', { data: '合成中保留' }))
+  })
+  // 补拉后：本地输入仍在编辑器且远端批注可见（contentVersion 未变 → 安全合并，无冲突）
+  await expect(ed).toContainText('合成中保留', { timeout: 10_000 })
+  await expect(thread(p).filter({ hasText: '合成期远端批注' })).toBeVisible({ timeout: 10_000 })
+  await expect(p.locator('.banner.conflict')).not.toBeVisible()
   // 标题与列表
   await p.locator('.outline-toolbar button[title="标题1"]').click()
   await p.keyboard.type('标题')
@@ -222,17 +245,31 @@ test('5. 自动保存失败后提交/确认不虚假成功，恢复后重试', a
   await expect(p.locator('.save')).toContainText('失败', { timeout: 15_000 })
   // 失败状态下提交反馈必须被阻止（drain 不通过/按钮禁用）
   const submitBtn = p.locator('button:has-text("提交反馈")')
-  console.log('C5_SAVE', await p.locator('.save').textContent(), 'DISABLED:', await submitBtn.isDisabled())
+
   await expect(submitBtn).toBeDisabled()
   // 恢复路由 → 自动重试保存
   await p.unroute(`**/api/docs/${doc.docId}/outline`)
   await p.locator('button:has-text("立即重试")').click()
-  await waitSaved(p)
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 15_000 })
   // 提交反馈成功且只生成一轮
   await submitBtn.click()
   await expect(p.locator('.submissions .sub-item').first()).toContainText('第 1 轮', { timeout: 10_000 })
   const list = await api(page.request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline/feedback`)
   expect((await list.json()).submissions.length).toBe(1)
+  // 提交后丢响应的重试语义：同 requestId+payload 的重复写服务端去重，不产生第二条修订/批注
+  const A = api(page.request, server.baseUrl, bearer(server.apiKey))
+  const st = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  const dup = { baseVersion: st.version, requestId: 'e2e-dedupe-c5', ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: '去重批注' }] }
+  const d1 = await A.post(`/api/docs/${doc.docId}/outline/ops`, dup)
+  expect(d1.status()).toBe(200)
+  const j1 = await d1.json()
+  // 丢响应重试：客户端原样重发同 requestId+同 baseVersion+同 ops（不是改版本号的新请求）
+  const d2 = await A.post(`/api/docs/${doc.docId}/outline/ops`, dup)
+  const j2 = await d2.json()
+  expect(j2.deduplicated).toBe(true)
+  expect(j2.version).toBe(j1.version)
+  const st2 = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(st2.threads.filter((t: { messages: { content: string }[] }) => t.messages[0]?.content === '去重批注').length).toBe(1)
 })
 
 // ── 例6：提交后继续编辑，区分已提交与未提交；Agent 读所选轮次快照 ──
@@ -366,13 +403,13 @@ test('10. 来源失效语义：正文/撤销 失效，评论 不失效', async (
 })
 
 // ── 例11：同时编辑冲突：本地输入可恢复、旧版本不覆盖新内容 ──
-test('11. 冲突：本地输入保留可恢复，旧版本不覆盖', async ({ server, outlinePage, request }) => {
+test('11. 冲突：远端删本地正在编辑的块 → 确定性 409，草稿可复制取回', async ({ server, outlinePage, request }) => {
   const doc = await server.createDoc('conflict')
   const A = api(request, server.baseUrl, bearer(server.apiKey))
   await A.post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
   const ed = editor(p)
-  // 延迟本地 PATCH 使远端 ops 先落地，确定性制造 409（否则竞态：本地先存则不会冲突）
+  // 延迟本地 PATCH，确保远端删块先落地（消除竞态）
   await p.route(`**/api/docs/${doc.docId}/outline`, async route => {
     if (route.request().method() === 'PATCH') {
       await new Promise(r => setTimeout(r, 800))
@@ -380,11 +417,15 @@ test('11. 冲突：本地输入保留可恢复，旧版本不覆盖', async ({ s
     }
     else await route.continue()
   })
+  const patchCodes: number[] = []
+  p.on('response', r => {
+    if (r.url().includes('/outline') && r.request().method() === 'PATCH') patchCodes.push(r.status()) 
+  })
   await ed.click()
-  // 本地对首段做块级修改（标题1）→ 该 step 依赖块仍存在；远端删块后重放必 409
-  await p.locator('.outline-toolbar button[title="标题1"]').click()
-  // Agent 先保存（本地 dirty 期间远端版本推进）
-  // 取当前块 id，远端删除本地正在输入的块 → 本地 steps 无法重放 → 409
+  await ed.locator('p').first().click()
+  await p.keyboard.type('CONFLICT-LOCAL-42')
+  await expect(p.locator('.save')).toContainText(/未保存|保存中/, { timeout: 5000 })
+  // 远端删除本地正在输入的块 → 本地 insert step 无法重放 → 确定性 409
   const cur = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
   const firstBlockId = cur.content.content[0].attrs.blockId
   const opsRes = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
@@ -392,29 +433,23 @@ test('11. 冲突：本地输入保留可恢复，旧版本不覆盖', async ({ s
     ops: [{ op: 'deleteBlocks', blockIds: [firstBlockId] }],
   })
   expect(opsRes.status()).toBe(200)
-  // 并发语义：本地 step 与远端写按版本重放合并（无静默丢失）；
-  // 若重放失败则走 409 冲突界面——两条路径都接受并核验本地草稿可恢复
-  const saveText = await p.locator('.save').textContent()
-  const conflicted = saveText?.includes('冲突') ?? false
-  if (conflicted) {
-    await expect(p.locator('.banner')).toContainText('本地未提交修改已保存为草稿')
-    await p.locator('button:has-text("复制草稿内容")').click()
-    const clip = await p.evaluate(() => navigator.clipboard.readText().catch(() => ''))
-    expect(clip.length).toBeGreaterThan(0)
-  }
-  // 无论合并还是冲突，远端版本推进且本地编辑历史未被覆盖崩溃
-  const fb2 = await A.get(`/api/docs/${doc.docId}/outline`)
-  expect((await fb2.json()).version).toBeGreaterThanOrEqual(2)
-  if (conflicted) {
-    // 刷新为最新版本后远端内容在、草稿可再取回
-    await p.locator('button:has-text("刷新为最新版本")').click()
-    await waitSaved(p)
-  }
-  const fb = await A.get(`/api/docs/${doc.docId}/outline`)
-  expect((await fb.json()).version).toBeGreaterThan(1)
+  // 确定性断言：冲突横幅 + 状态文本
+  await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 10000 })
+  await expect(p.locator('.save')).toContainText('冲突')
+  expect(patchCodes).toContain(409)
+  // 草稿复制必须包含实际输入的文本
+  await p.locator('button:has-text("复制草稿内容")').click()
+  const clip = await p.evaluate(() => (navigator as unknown as { clipboard: { readText(): Promise<string> } }).clipboard.readText())
+  expect(clip).toContain('CONFLICT-LOCAL-42')
+  // 恢复：刷新为最新版本 → 远端删除生效、状态恢复、本地草稿仍可取回
+  await p.locator('button:has-text("刷新为最新版本")').click()
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
+  const fb = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(fb.version).toBeGreaterThanOrEqual(2)
+  const ids = fb.content.content.map((b: { attrs: { blockId: string } }) => b.attrs.blockId)
+  expect(ids).not.toContain(firstBlockId)
 })
 
-// ── 例12：权限边界：只读/失效令牌/禁用账号/他人 Key/跨项目素材 ──
 test('12. 权限边界', async ({ server, page, request }) => {
   const mcp = await connectMcp(server)
   const doc = await server.createDoc('auth')
@@ -488,9 +523,39 @@ test('13. 导航重连窄屏可用；旧 PPT 行为不回归', async ({ server, 
   const doc = await server.createDoc('nav')
   await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
-  // 窄屏：批注抽屉切换
+  const A = api(request, server.baseUrl, bearer(server.apiKey))
+  const ed = editor(p)
+  const SHOTS = process.env.PPTBASE_E2E_OUT ?? '/home/dev/worklogs/pptbase-outlines/authorized-extra-round/playwright-results'
+  await p.screenshot({ path: `${SHOTS}/../screenshots/case13-loaded.png`, fullPage: true })
+  // SSE 断线→重连：先注册拦截再 reload → 事件流建立即被断（真实断线态）；
+  // 远端更新不可见；放行后退避重连 → onReconnect 独立 GET 补拉 → 批注可见
+  await p.route('**/api/docs/*/events', r => r.abort())
+  await p.reload()
+  await p.waitForSelector('.outline-editor .ProseMirror')
+  const c1 = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  const rmt = await A.post(`/api/docs/${doc.docId}/outline/ops`, { baseVersion: c1.version, ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: '断线批注X' }] })
+  expect(rmt.status()).toBe(200)
+  await p.waitForTimeout(2500)
+  await expect(thread(p).filter({ hasText: '断线批注X' })).not.toBeVisible()
+  await p.unroute('**/api/docs/*/events')
+  await expect(thread(p).filter({ hasText: '断线批注X' })).toBeVisible({ timeout: 30_000 })
+  // 脏导航：PATCH 被断 → drain 失败 → confirm 取消留在页面；恢复后正常离开
+  await p.route(`**/api/docs/${doc.docId}/outline`, r => {
+    if (r.request().method() === 'PATCH') void r.abort('failed'); else void r.continue() 
+  })
+  await ed.click()
+  await p.keyboard.type('DIRTY-NAV-X')
+  await expect(p.locator('.save')).toContainText(/未保存|失败/, { timeout: 15_000 })
+  const dlg = p.waitForEvent('dialog', { timeout: 60_000 })
+  await p.locator('a:has-text("查看 PPT")').click()
+  await (await dlg).dismiss() // 取消 → 停留
+  expect(p.url()).toContain('outline')
+  await expect(ed).toContainText('DIRTY-NAV-X')
+  await p.unroute(`**/api/docs/${doc.docId}/outline`)
+  // 窄屏：批注抽屉切换 + 截图
   await p.setViewportSize({ width: 480, height: 800 })
   await expect(p.locator('.comments-panel')).toBeVisible()
+  await p.screenshot({ path: `${SHOTS}/../screenshots/case13-narrow.png`, fullPage: true })
   await p.locator('.drawer-toggle').click()
   await expect(p.locator('.comments-panel')).not.toBeVisible()
   await p.setViewportSize({ width: 1280, height: 800 })

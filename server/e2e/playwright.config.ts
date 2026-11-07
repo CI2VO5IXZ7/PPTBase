@@ -25,6 +25,7 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     ...devices['Desktop Chrome'],
+    permissions: ['clipboard-read', 'clipboard-write'],
     actionTimeout: 10_000,
     trace: 'retain-on-failure',
   },

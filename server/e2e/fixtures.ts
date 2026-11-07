@@ -2,13 +2,12 @@
 // 不碰任何真实账号/数据/Key；用例结束仅清理本用例创建的临时目录。
 import { test as base, expect, type Page } from 'playwright/test'
 import { fileURLToPath } from 'node:url'
-import { dirname as _dirname } from 'node:path'
+import { dirname as _dirname, join } from 'node:path'
 const __dirname = _dirname(fileURLToPath(import.meta.url))
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { nanoid } from 'nanoid'
 import type { FastifyInstance } from 'fastify'
 

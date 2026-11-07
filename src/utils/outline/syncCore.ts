@@ -193,6 +193,20 @@ export class OutlineSyncCore {
   async pull(applyRemote: boolean): Promise<'applied' | 'deferred' | 'meta-only'> {
     const state = await this.transport.getState()
     if (this.queue.size) {
+      // 远端正文已变 + 本地未提交 steps：不得推进版本盲放旧位置 steps → 进入冲突保草稿
+      if (state.contentVersion > this.contentVersion) {
+        this.remotePullPending = true
+        this.localDraft = { content: this.currentDoc, steps: [...this.queue.snapshotAll()] }
+        this.setStatus('conflict', '远端正文已更新，与本地未保存修改冲突')
+        this.events.onConflict?.({
+          remoteVersion: state.version,
+          remoteContentVersion: state.contentVersion,
+          localSteps: this.localDraft.steps,
+        })
+        this.events.onRemoteState?.(state)
+        return 'deferred'
+      }
+      // 仅元数据推进：版本可前进（正文基线未变，steps 基线仍有效）
       this.version = Math.max(this.version, state.version)
       this.remotePullPending = true
       this.events.onRemoteState?.(state)
