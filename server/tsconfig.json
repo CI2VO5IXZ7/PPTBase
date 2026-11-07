@@ -11,6 +11,6 @@
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test", "../src/types/slides.ts", "../src/types/outline.ts", "../src/utils/outline"],
+  "include": ["src", "test", "e2e", "../src/types/slides.ts", "../src/types/outline.ts", "../src/utils/outline"],
   "exclude": ["../src/utils/outline/viewSchema.ts", "../src/utils/outline/pendingSteps.ts", "../src/utils/outline/syncCore.ts"]
 }

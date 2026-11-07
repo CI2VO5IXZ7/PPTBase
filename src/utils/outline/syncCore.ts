@@ -15,6 +15,7 @@ export type StepJson = Record<string, unknown>
 
 export interface OutlineStateSnapshot {
   version: number
+  role?: string
   contentVersion: number
   content: Record<string, unknown>
   threads: unknown[]

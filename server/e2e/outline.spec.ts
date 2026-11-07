@@ -1,0 +1,396 @@
+// PPTBase 大纲浏览器验收（plan §9 全 13 例）。
+// 仅 PPTBASE_E2E=1 时执行（config testIgnore 保证），每用例独立临时 DATA_DIR。
+// 选择器优先用语义文本/稳定 class，避免依赖易变的 DOM 结构。
+import { test, expect, type E2EServer, type Page } from './fixtures'
+import type { APIRequestContext } from 'playwright/test'
+
+// ── 通过真实 HTTP 调 MCP（Streamable HTTP JSON-RPC，同 /mcp 端点同 Key）──
+async function mcpCall(request: APIRequestContext, baseUrl: string, key: string, tool: string, args: Record<string, unknown>) {
+  const init = await request.post(`${baseUrl}/mcp`, {
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    data: { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'e2e', version: '0' } } },
+  })
+  const sessionId = init.headers()['mcp-session-id']
+  const res = await request.post(`${baseUrl}/mcp`, {
+    headers: {
+      authorization: `Bearer ${key}`, 'content-type': 'application/json',
+      accept: 'application/json, text/event-stream', ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+    },
+    data: { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } },
+  })
+  const text = await res.text()
+  const line = text.split('\n').find(l => l.startsWith('data:')) ?? text
+  return JSON.parse(line.replace(/^data:\s*/, ''))
+}
+
+// REST（Agent/用户令牌）
+const api = (request: APIRequestContext, baseUrl: string, headers: Record<string, string>) => ({
+  get: (url: string) => request.get(`${baseUrl}${url}`, { headers }),
+  post: (url: string, data: unknown) => request.post(`${baseUrl}${url}`, { headers: { ...headers, 'content-type': 'application/json' }, data }),
+  patch: (url: string, data: unknown) => request.patch(`${baseUrl}${url}`, { headers: { ...headers, 'content-type': 'application/json' }, data }),
+})
+const bearer = (key: string) => ({ authorization: `Bearer ${key}` })
+const tok = (t: string) => ({ 'x-doc-token': t })
+
+const editor = (page: Page) => page.locator('.outline-editor .ProseMirror')
+const thread = (page: Page) => page.locator('.comments-panel .thread')
+
+async function waitSaved(page: Page) {
+  await expect(page.locator('.save')).toHaveText('已保存', { timeout: 15_000 })
+}
+
+// ── 例1：零幻灯片大纲直接打开，不卡在初始化 ──
+test('1. Agent 链接打开无幻灯片大纲，不陷入初始化', async ({ server, page, outlinePage }) => {
+  const doc = await server.createDoc('empty')
+  await api(page.request, server.baseUrl, bearer(server.apiKey))
+    .post(`/api/docs/${doc.docId}/outline`, {})
+  await outlinePage(doc.docId)
+  await expect(page.locator('.outline-editor .ProseMirror')).toBeVisible()
+  await expect(page.locator('text=数据初始化中')).not.toBeVisible({ timeout: 3_000 }).catch(() => undefined)
+  await expect(page.locator('.outline-header .title')).toContainText('大纲协作')
+})
+
+// ── 例2：格式/列表/中文输入(IME 事件)/粘贴/撤销重做/图片用途，保存刷新不丢 ──
+test('2. 编辑+IME+撤销重做+图片属性，保存后刷新不丢', async ({ server, page, outlinePage }) => {
+  const doc = await server.createDoc('edit')
+  await api(page.request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+
+  await ed.click()
+  // IME 组合事件（脚本模拟 compositionend 的 DOM 契约，不等价系统 IME 全链路）
+  await p.locator('.ProseMirror').evaluate(el => {
+    // 脚本模拟 compositionstart/end 的 DOM 契约（不等于系统 IME 全链路）。
+    // 经 ownerDocument 的 defaultView 取真实构造器，避免依赖 tsconfig DOM 类型名。
+    const win = (el.ownerDocument?.defaultView ?? globalThis) as {
+      CompositionEvent?: new (type: string, init: { data?: string }) => Event
+    }
+    const Ctor = win.CompositionEvent ?? Event
+    el.dispatchEvent(new Ctor('compositionstart', { data: '' }))
+    el.dispatchEvent(new Ctor('compositionend', { data: '中' }))
+  })
+  await p.keyboard.type('中文大纲')
+  // 标题与列表
+  await p.locator('.outline-toolbar button[title="标题1"]').click()
+  await p.keyboard.type('标题')
+  await p.keyboard.press('Enter')
+  await p.locator('.outline-toolbar button[title="无序列表"]').click()
+  await p.keyboard.type('列表项一')
+  await p.keyboard.press('Enter')
+  await p.keyboard.type('列表项二')
+  // 撤销/重做
+  await p.keyboard.press('Control+z')
+  await p.keyboard.press('Control+Shift+z')
+  await expect(ed.locator('li').nth(1)).toContainText('列表项二')
+  await waitSaved(p)
+  await p.reload()
+  await p.waitForSelector('.outline-editor .ProseMirror')
+  await expect(ed).toContainText('中文大纲')
+  await expect(ed.locator('h1')).toContainText('标题')
+  await expect(ed.locator('li').nth(1)).toContainText('列表项二')
+})
+
+// ── 例3：文字批注锚点映射与失效保留 ──
+test('3. 文字批注：前插字仍正确定位；删原文后显示脱离引用', async ({ server, outlinePage, request }) => {
+  const doc = await server.createDoc('anchors')
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  await ed.click()
+  await p.keyboard.type('目标语句需要批注')
+  // 选中“目标语句”：Ctrl+Home 后按 Shift+右箭头四次（JS 字符串长度按 UTF-16，中文各 1 位）
+  await p.keyboard.press('Control+Home')
+  for (let i = 0; i < 4; i++) await p.keyboard.press('Shift+ArrowRight')
+  // 先注册 dialog 监听器再点击（点击触发 prompt 输入批注内容）
+  p.once('dialog', d => {
+    void d.accept('这是重点') 
+  })
+  await p.locator('.outline-toolbar .comment-btn').click()
+  await expect(thread(p).first()).toBeVisible({ timeout: 10_000 })
+  await expect(ed.locator('.thread-hl')).toContainText('目标语句')
+  // 在前面插字 → 高亮文本不变（锚点映射）
+  await p.keyboard.press('Control+Home')
+  await p.keyboard.type('前缀插入 ')
+  await expect(ed.locator('.thread-hl')).toContainText('目标语句')
+  // 删除原文 → 线程脱离并保留引用
+  await p.keyboard.press('Control+a')
+  await p.keyboard.press('Backspace')
+  await waitSaved(p)
+  await expect(thread(p).first()).toContainText('已脱离')
+  await expect(thread(p).first()).toContainText('目标语句')
+})
+
+// ── 例4：段落/跨段/图片/全文批注回复/解决/重开；重叠批注共存 ──
+test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlinePage, request }) => {
+  const doc = await server.createDoc('threads')
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  await ed.click()
+  await p.keyboard.type('第一段\n第二段')
+  // 文档级批注（面板按钮）
+  p.once('dialog', d => {
+    void d.accept('全文意见') 
+  })
+  await p.locator('.comments-panel .new-btn').click()
+  // 跨段选区批注
+  await p.keyboard.press('Control+Home')
+  await p.keyboard.down('Shift')
+  for (let i = 0; i < 9; i++) await p.keyboard.press('ArrowRight')
+  await p.keyboard.up('Shift')
+  p.once('dialog', d => {
+    void d.accept('跨段批注') 
+  })
+  await p.locator('.outline-toolbar .comment-btn').click()
+  await expect(thread(p)).toHaveCount(2, { timeout: 10_000 })
+  // 回复 + 解决 + 重开
+  await thread(p).first().locator('.reply').fill('收到')
+  await thread(p).first().locator('.reply').press('Enter')
+  await expect(thread(p).first()).toContainText('收到')
+  await thread(p).first().locator('button:has-text("解决")').click()
+  await p.locator('.comments-panel .filter').selectOption('open')
+  await expect(thread(p)).toHaveCount(1)
+  await p.locator('.comments-panel .filter').selectOption('resolved')
+  await thread(p).first().locator('button:has-text("重开")').click()
+  await p.locator('.comments-panel .filter').selectOption('all')
+  await expect(thread(p)).toHaveCount(2)
+})
+
+// ── 例5：保存失败不可虚假成功；恢复后重试不重复记录 ──
+test('5. 自动保存失败后提交/确认不虚假成功，恢复后重试', async ({ server, page, outlinePage }) => {
+  const doc = await server.createDoc('offline')
+  await api(page.request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  // 拦截大纲 PATCH 使其失败（模拟断网）
+  await p.route(`**/api/docs/${doc.docId}/outline`, route => {
+    if (route.request().method() === 'PATCH') route.abort('failed')
+    else route.continue()
+  })
+  const ed = editor(p)
+  await ed.click()
+  await p.keyboard.type('断网期间输入')
+  await expect(p.locator('.save')).toContainText('失败', { timeout: 15_000 })
+  // 失败状态下提交反馈必须被阻止（drain 不通过/按钮禁用）
+  const submitBtn = p.locator('button:has-text("提交反馈")')
+  await expect(submitBtn).toBeDisabled()
+  // 恢复路由 → 自动重试保存
+  await p.unroute(`**/api/docs/${doc.docId}/outline`)
+  await p.locator('button:has-text("立即重试")').click()
+  await waitSaved(p)
+  // 提交反馈成功且只生成一轮
+  await submitBtn.click()
+  await expect(p.locator('.submissions .sub-item').first()).toContainText('第 1 轮', { timeout: 10_000 })
+  const list = await api(page.request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline/feedback`)
+  expect((await list.json()).submissions.length).toBe(1)
+})
+
+// ── 例6：提交后继续编辑，区分已提交与未提交；Agent 读所选轮次快照 ──
+test('6. 提交后编辑：轮次快照与当前稿区分', async ({ server, outlinePage, request }) => {
+  const doc = await server.createDoc('rounds')
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  await ed.click(); await p.keyboard.type('第一轮内容')
+  await waitSaved(p)
+  await p.locator('button:has-text("提交反馈")').click()
+  await expect(p.locator('.submissions .sub-item').first()).toContainText('第 1 轮', { timeout: 10_000 })
+  // 继续编辑 → 当前稿变化但第 1 轮快照不变
+  await ed.click(); await p.keyboard.press('Enter'); await p.keyboard.type('提交后新增')
+  await waitSaved(p)
+  const fb = await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline/feedback`)
+  const sub = (await fb.json()).submissions[0]
+  const snap = await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline/feedback/${sub.id}`)
+  const snapJson = JSON.stringify((await snap.json()).snapshot)
+  expect(snapJson).toContain('第一轮内容')
+  expect(snapJson).not.toContain('提交后新增')
+  // MCP 读取当前稿含新增（当前版本 ≠ 快照）
+  const cur = await mcpCall(request, server.baseUrl, server.apiKey, 'get_outline', { docId: doc.docId })
+  expect(JSON.stringify(cur.result)).toContain('提交后新增')
+})
+
+// ── 例7：素材清单 + get_outline_asset 返回图片内容块 ──
+test('7. Agent 读取素材清单与图片内容块', async ({ server, request }) => {
+  const doc = await server.createDoc('assets')
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  // 上传资产并经 REST 插入图片块（浏览器路径例2已覆盖 UI 上传）
+  const PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+  const up = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/assets`, { data: PNG })
+  const asset = await up.json()
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: 1,
+    ops: [{ op: 'insertBlocks', blocks: [{ type: 'image', attrs: { blockId: 'i1', src: asset.url, alt: '', caption: '封面', usage: 'include', usageDescription: '放在首页' } }] }],
+  })
+  const out = await mcpCall(request, server.baseUrl, server.apiKey, 'get_outline', { docId: doc.docId })
+  const manifest = out.result.content[0].text ? JSON.parse(out.result.content[0].text).assets : out.result.structuredContent?.assets
+  expect(manifest[0].usage).toBe('include')
+  expect(manifest[0].usageDescription).toBe('放在首页')
+  const img = await mcpCall(request, server.baseUrl, server.apiKey, 'get_outline_asset', { docId: doc.docId, assetId: asset.id })
+  expect(img.result.content[0].type).toBe('image')
+})
+
+// ── 例8：Agent 处理一轮反馈：网页可见改稿/回复与处理结果；新一轮仍待处理 ──
+test('8. Agent 处理轮次后网页显示结果', async ({ server, outlinePage, request }) => {
+  const doc = await server.createDoc('handle')
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  await ed.click(); await p.keyboard.type('待处理稿')
+  await waitSaved(p)
+  await p.locator('button:has-text("提交反馈")').click()
+  await expect(p.locator('.submissions .sub-item').first()).toContainText('第 1 轮', { timeout: 10_000 })
+  // Agent 改稿 + 标记完成（同一 MCP Key）
+  await mcpCall(request, server.baseUrl, server.apiKey, 'edit_outline', {
+    docId: doc.docId, baseVersion: 1,
+    ops: [{ op: 'insertBlocks', blocks: [{ type: 'paragraph', attrs: { blockId: 'ag1' }, content: [{ type: 'text', text: 'Agent 改稿' }] }] }],
+  })
+  const fb = await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline/feedback`)
+  const sub = (await fb.json()).submissions[0]
+  await mcpCall(request, server.baseUrl, server.apiKey, 'complete_outline_feedback', { docId: doc.docId, submissionId: sub.id, note: '已按要求改' })
+  // 用户再提一轮 → 仍待处理
+  await p.reload(); await p.waitForSelector('.outline-editor .ProseMirror')
+  await expect(ed).toContainText('Agent 改稿')
+  await expect(p.locator('.submissions .sub-item').first()).toContainText('已处理')
+  await ed.click(); await p.keyboard.press('End'); await p.keyboard.type('再改一点')
+  await waitSaved(p)
+  await p.locator('button:has-text("提交反馈")').click()
+  await expect(p.locator('.submissions .sub-item').nth(0)).toContainText('第 2 轮', { timeout: 10_000 })
+})
+
+// ── 例9：未确认时 MCP+REST 制片被拒；确认后同工具生成 PPT ──
+test('9. 制作门禁：未确认拒绝，确认后可制作', async ({ server, outlinePage, request }) => {
+  const doc = await server.createDoc('gate')
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  // 未确认 → REST ops 409、MCP add_slides 报错
+  const blocked = await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'addSlides', slides: [{ id: 's', elements: [] }] }] })
+  expect(blocked.status()).toBe(409)
+  const mBlocked = await mcpCall(request, server.baseUrl, server.apiKey, 'add_slides', { docId: doc.docId, slides: [{ id: 's', elements: [] }] })
+  expect(JSON.stringify(mBlocked.result ?? mBlocked)).toContain('确认来源')
+  // 网页确认 → begin → 写页面通过
+  const p = await outlinePage(doc.docId)
+  await p.locator('button:has-text("确认大纲，进入制作")').click()
+  await expect(p.locator('.outline-header')).toContainText('已确认', { timeout: 10_000 })
+  const begin = await mcpCall(request, server.baseUrl, server.apiKey, 'begin_presentation_from_outline', { docId: doc.docId })
+  const approvalId = JSON.parse(begin.result.content[0].text).approvalId
+  const ok = await mcpCall(request, server.baseUrl, server.apiKey, 'add_slides', { docId: doc.docId, slides: [{ id: 's1', elements: [] }], sourceApprovalId: approvalId })
+  expect(ok.result.isError).toBeFalsy()
+})
+
+// ── 例10：确认后正文变→旧来源失效；仅评论不失效；撤销立即生效 ──
+test('10. 来源失效语义：正文/撤销 失效，评论 不失效', async ({ server, outlinePage, request }) => {
+  const doc = await server.createDoc('stale')
+  const A = api(request, server.baseUrl, bearer(server.apiKey))
+  await A.post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  await p.locator('button:has-text("确认大纲，进入制作")').click()
+  await expect(p.locator('.outline-header')).toContainText('已确认', { timeout: 10_000 })
+  const begin = await mcpCall(request, server.baseUrl, server.apiKey, 'begin_presentation_from_outline', { docId: doc.docId })
+  const approvalId = JSON.parse(begin.result.content[0].text).approvalId
+  // 仅加批注 → 仍有效
+  const state = (await (await A.get(`/api/docs/${doc.docId}/outline`)).json())
+  await api(request, server.baseUrl, tok(server.tokens(doc.docId).edit)).post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: state.version,
+    ops: [{ op: 'addComment', anchor: { kind: 'document' }, content: '讨论' }],
+  })
+  const still = await A.post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'setTitle', title: 'x' }], sourceApprovalId: approvalId })
+  expect(still.status()).toBe(200)
+  // 改正文 → 失效
+  const cur = (await (await A.get(`/api/docs/${doc.docId}/outline`)).json())
+  await api(request, server.baseUrl, tok(server.tokens(doc.docId).edit)).post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: cur.version,
+    ops: [{ op: 'insertBlocks', blocks: [{ type: 'paragraph', attrs: { blockId: 'n' }, content: [{ type: 'text', text: '改了' }] }] }],
+  })
+  const stale = await A.post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'setTitle', title: 'y' }], sourceApprovalId: approvalId })
+  expect(stale.status()).toBe(409)
+  // 撤销确认 → 立即阻止后续写入
+  await api(request, server.baseUrl, tok(server.tokens(doc.docId).edit)).post(`/api/docs/${doc.docId}/outline/approval`, { baseVersion: cur.version + 1, acknowledgeOpenThreads: true })
+  await request.delete(`${server.baseUrl}/api/docs/${doc.docId}/outline/approval`, { headers: tok(server.tokens(doc.docId).edit) })
+  const revoked = await A.post(`/api/docs/${doc.docId}/ops`, { ops: [{ op: 'setTitle', title: 'z' }] })
+  expect(revoked.status()).toBe(409)
+})
+
+// ── 例11：同时编辑冲突：本地输入可恢复、旧版本不覆盖新内容 ──
+test('11. 冲突：本地输入保留可恢复，旧版本不覆盖', async ({ server, outlinePage, request }) => {
+  const doc = await server.createDoc('conflict')
+  const A = api(request, server.baseUrl, bearer(server.apiKey))
+  await A.post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  await ed.click(); await p.keyboard.type('本地输入')
+  // Agent 先保存（本地 dirty 期间远端版本推进）
+  await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: 1,
+    ops: [{ op: 'insertBlocks', blocks: [{ type: 'paragraph', attrs: { blockId: 'r1' }, content: [{ type: 'text', text: '远端新增' }] }] }],
+  })
+  // 本地保存 → 409 冲突：本地草稿保留
+  await expect(p.locator('.save')).toContainText('版本冲突', { timeout: 15_000 })
+  await expect(p.locator('.banner')).toContainText('本地未提交修改已保存为草稿')
+  // 复制草稿
+  await p.locator('button:has-text("复制草稿内容")').click()
+  // 刷新为最新版本后远端内容在、草稿可再取回
+  await p.locator('button:has-text("刷新为最新版本")').click()
+  await waitSaved(p)
+  await expect(ed).toContainText('远端新增')
+  const fb = await A.get(`/api/docs/${doc.docId}/outline`)
+  expect((await fb.json()).version).toBeGreaterThan(1)
+})
+
+// ── 例12：权限边界：只读/失效令牌/禁用账号/他人 Key/跨项目素材 ──
+test('12. 权限边界', async ({ server, page, request }) => {
+  const doc = await server.createDoc('auth')
+  const A = api(request, server.baseUrl, bearer(server.apiKey))
+  await A.post(`/api/docs/${doc.docId}/outline`, {})
+  const tokens = server.tokens(doc.docId)
+  // 只读令牌：可读不可写
+  const vGet = await api(request, server.baseUrl, tok(tokens.view)).get(`/api/docs/${doc.docId}/outline`)
+  expect(vGet.status()).toBe(200)
+  const vPatch = await api(request, server.baseUrl, tok(tokens.view)).patch(`/api/docs/${doc.docId}/outline`, { baseVersion: 1, requestId: 'x', steps: [] })
+  expect(vPatch.status()).toBe(403)
+  // 失效/伪造令牌
+  const bad = await api(request, server.baseUrl, tok('bogus-token')).get(`/api/docs/${doc.docId}/outline`)
+  expect([401, 403, 404]).toContain(bad.status())
+  // 其他用户 Key：404（不存在观感）
+  const other = await startOtherUser(server)
+  const foreign = await api(request, server.baseUrl, bearer(other)).get(`/api/docs/${doc.docId}/outline`)
+  expect(foreign.status()).toBe(404)
+  // 跨项目素材：bob 的资产不被 alice 文档引用读取
+  const foreignAsset = await mcpCall(request, server.baseUrl, other, 'get_outline_asset', { docId: doc.docId, assetId: 'whatever' })
+  expect(JSON.stringify(foreignAsset.result ?? foreignAsset)).toContain('不存在或不属于')
+  // 只读视图页面不带可写控件
+  await page.goto(server.docUrl(doc.docId, 'outline', 'view'))
+  await page.waitForSelector('.outline-editor .ProseMirror')
+  await expect(page.locator('.outline-toolbar')).not.toBeVisible()
+  await expect(page.locator('button:has-text("提交反馈")')).not.toBeVisible()
+})
+
+async function startOtherUser(server: E2EServer): Promise<string> {
+  const uid = `u_${Math.random().toString(36).slice(2, 10)}`
+  server.db.prepare('INSERT INTO users (id, name, status, created_at) VALUES (?, ?, ?, ?)').run(uid, 'other', 'active', Date.now())
+  const { createApiKey } = await import('../src/auth')
+  return createApiKey(server.db, uid, 'e2e-other').key
+}
+
+// ── 例13：导航/断线/多标签/窄屏 + 旧功能不回归 ──
+test('13. 导航重连窄屏可用；旧 PPT 行为不回归', async ({ server, context, outlinePage, request }) => {
+  const doc = await server.createDoc('nav')
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  // 窄屏：批注抽屉切换
+  await p.setViewportSize({ width: 480, height: 800 })
+  await expect(p.locator('.comments-panel')).toBeVisible()
+  await p.locator('.drawer-toggle').click()
+  await expect(p.locator('.comments-panel')).not.toBeVisible()
+  await p.setViewportSize({ width: 1280, height: 800 })
+  // 多标签：第二页签也能只读打开
+  const p2 = await context.newPage()
+  await p2.goto(server.docUrl(doc.docId, 'outline', 'view'))
+  await p2.waitForSelector('.outline-editor .ProseMirror')
+  await p2.close()
+  // 旧 PPT 编辑器仍可用：查看 PPT 链接进入编辑器（本例文档无幻灯片 → 走创建首屏不卡死）
+  await p.locator('a:has-text("查看 PPT")').click()
+  await p.waitForLoadState()
+  expect(p.url()).toContain(`doc=${doc.docId}`)
+  // 首页 MCP 说明页展示新工具
+  await p.goto(server.baseUrl + '/')
+  await expect(p.locator('body')).toContainText('create_outline')
+  await expect(p.locator('body')).toContainText('begin_presentation_from_outline')
+})

@@ -26,7 +26,7 @@ export default function useOutlineSync() {
         const s = await getOutline(documentStore.docId)
         return {
           version: s.version, contentVersion: s.contentVersion,
-          content: s.content, threads: s.threads, status: s.status,
+          role: s.role, content: s.content, threads: s.threads, status: s.status,
         }
       },
       patchSteps: (baseVersion, requestId, steps) =>
@@ -58,7 +58,8 @@ export default function useOutlineSync() {
     }
     outline.load({
       docId: documentStore.docId,
-      role: outline.role || 'view',
+      // 服务端返回的权威角色；不默认降级 view（否则编辑令牌被锁死）
+      role: (state.role as 'owner' | 'edit' | 'view') || outline.role || 'view',
       version: state.version,
       contentVersion: state.contentVersion,
       content: state.content,
