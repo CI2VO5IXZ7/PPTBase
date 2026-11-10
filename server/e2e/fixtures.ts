@@ -99,8 +99,8 @@ async function releaseBrowserPage(page: Page, baseUrl: string) {
   const origin = baseUrl.replace(/\/$/, '')
   await page.route(`${origin}/**`, route => route.abort('failed')).catch(() => undefined)
   await page.evaluate(() => {
-    const el = document.querySelector('#app') as (HTMLElement & { __vue_app__?: { unmount(): void } }) | null
-    el?.__vue_app__?.unmount()
+    const root = globalThis as { document?: { querySelector(sel: string): { __vue_app__?: { unmount(): void } } | null } }
+    root.document?.querySelector('#app')?.__vue_app__?.unmount()
   }).catch(() => undefined)
   await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5_000 }).catch(() => undefined)
 }

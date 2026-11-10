@@ -241,23 +241,26 @@ test('3. 文字批注：前插字仍正确定位；删原文后显示脱离引�
   await p.keyboard.type('前缀插入 ')
   await expect(ed.locator('.thread-hl')).toContainText('目标语句')
   // 删除被批注覆盖的原文（UI：在 ProseMirror 内选区删除，非 REST）
-  await p.locator('.ProseMirror').evaluate(el => {
-    const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
-    let node: Node | null
-    while ((node = tw.nextNode())) {
+  // 页面内选区删除。此前合成 Backspace 不产生 PATCH；这不是操作系统键盘，也不是 REST。
+  await p.locator('.ProseMirror').evaluate(root => {
+    const doc = root.ownerDocument
+    if (!doc) throw new Error('no document')
+    const tw = doc.createTreeWalker(root, 4)
+    let node = tw.nextNode()
+    while (node) {
       const t = node.textContent ?? ''
       const i = t.indexOf('目标语句')
-      if (i < 0) continue
-      const range = document.createRange()
-      range.setStart(node, i)
-      range.setEnd(node, i + '目标语句'.length)
-      const sel = el.ownerDocument?.getSelection()
-      sel?.removeAllRanges()
-      sel?.addRange(range)
-      // 在真实选区上执行编辑命令。合成 Backspace 在先前默认 30s 跑次中不产生 PATCH，
-    // 因此这里不用 REST，也不把它称作系统键盘。
-    el.ownerDocument?.execCommand('delete')
-      return
+      if (i >= 0) {
+        const range = doc.createRange()
+        range.setStart(node, i)
+        range.setEnd(node, i + '目标语句'.length)
+        const sel = doc.getSelection()
+        sel?.removeAllRanges()
+        sel?.addRange(range)
+        doc.execCommand('delete')
+        return
+      }
+      node = tw.nextNode()
     }
     throw new Error('目标语句 not found in editor')
   })
@@ -809,7 +812,10 @@ test('15. 剪贴板粘贴写入正文并保存', async ({ server, outlinePage, p
   await api(page.request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
   const ed = editor(p)
-  await p.evaluate(async () => { await navigator.clipboard.writeText('PASTE-TOKEN-42') })
+  await p.evaluate(async () => {
+    const nav = globalThis as unknown as { navigator: { clipboard: { writeText(text: string): Promise<void> } } }
+    await nav.navigator.clipboard.writeText('PASTE-TOKEN-42')
+  })
   await ed.click()
   await p.keyboard.press('Control+v')
   await expect(ed).toContainText('PASTE-TOKEN-42')
