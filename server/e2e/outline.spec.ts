@@ -48,8 +48,14 @@ async function waitSaved(page: Page) {
 
 async function submitCommentModal(p: Page, text: string) {
   await p.locator('.modal-content textarea, textarea').first().fill(text)
+  // 独立复测 trace（例3 call@266 在 15981ms 点击结束，POST /outline/ops 200 已发生，
+  // waitForResponse 直到 16004ms 才订阅，15s 后超时）。监听必须先于点击。
+  const saved = p.waitForResponse(
+    r => r.url().includes('/outline/ops') && r.request().method() === 'POST' && r.status() === 200,
+    { timeout: 15_000 },
+  )
   await p.locator('.modal-content button:has-text("确定"), button:has-text("确定")').first().click()
-  await p.waitForResponse(r => r.url().includes('/outline/ops') && r.status() === 200, { timeout: 15_000 })
+  await saved
 }
 
 async function toolbarComment(p: Page, text: string) {
