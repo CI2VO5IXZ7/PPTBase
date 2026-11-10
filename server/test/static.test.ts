@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -8,9 +8,11 @@ import { auth, createUser, makeApp, PNG_DATA_URL, type TestContext } from './hel
 // §八 M5：生产模式下服务端用 @fastify/static 托管前端构建产物（vite assetsDir=static），
 // SPA fallback 只回退非 API 路径；/assets /exports /mcp /api 仍走各自路由
 let ctx: TestContext
+let staticDir = ''
 
 beforeAll(async () => {
-  const staticDir = mkdtempSync(join(tmpdir(), 'pptist-static-'))
+  staticDir = mkdtempSync(join(tmpdir(), 'pptist-static-'))
+  writeFileSync(join(staticDir, '..', 'outside-leak.txt'), 'SECRET_OUTSIDE_STATIC_ROOT')
   mkdirSync(join(staticDir, 'static'))
   writeFileSync(join(staticDir, 'index.html'), '<!doctype html><html><body>pptist-index</body></html>')
   writeFileSync(join(staticDir, 'admin.html'), '<!doctype html><html><body>pptist-admin <script src="./static/admin-x.js"></script></body></html>')
@@ -21,6 +23,11 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await ctx.app.close()
+  try {
+    rmSync(join(staticDir, '..', 'outside-leak.txt'), { force: true })
+    rmSync(staticDir, { recursive: true, force: true })
+  }
+  catch { /* ignore */ }
 })
 
 describe('静态前端托管', () => {
@@ -109,6 +116,39 @@ describe('静态前端托管', () => {
     expect(res.statusCode).toBe(404)
     expect(res.json()).toMatchObject({ error: 'not_found' })
     expect(res.headers['content-type']).toContain('application/json')
+  })
+
+  it('路径穿越：明文 .. 不得读出 static root 外文件', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '/static/../outside-leak.txt' })
+    expect(res.body).not.toBe('SECRET_OUTSIDE_STATIC_ROOT')
+    expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
+  })
+
+  it('路径穿越：编码 %2E%2E 不得读出 static root 外文件', async () => {
+    const res = await ctx.app.inject({
+      method: 'GET',
+      url: '/static/%2E%2E/outside-leak.txt',
+    })
+    expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
+    if (res.statusCode === 200) {
+      expect(res.body).not.toBe('console.log("bundle")')
+    }
+    else {
+      expect([403, 404]).toContain(res.statusCode)
+    }
+  })
+
+  it('非规范斜杠：//static/... 不得因双斜杠越权读盘', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '//static/index-abc123.js' })
+    expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
+    if (res.statusCode === 200) expect(res.body).toBe('console.log("bundle")')
+    else expect([403, 404]).toContain(res.statusCode)
+  })
+
+  it('目录列表：GET /static/ 不得返回 HTML 目录索引', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '/static/' })
+    expect(res.body).not.toMatch(/<a href=/i)
+    expect(res.body).not.toMatch(/Directory listing/i)
   })
 })
 
