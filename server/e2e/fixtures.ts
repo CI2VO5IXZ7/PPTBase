@@ -1,6 +1,6 @@
 // E2E 隔离夹具：每用例独立临时 DATA_DIR（DB+assets），内存随机端口起真实应用。
 // 不碰任何真实账号/数据/Key；用例结束仅清理本用例创建的临时目录。
-import { test as base, expect, type Page } from 'playwright/test'
+import { test as base, expect } from 'playwright/test'
 import { fileURLToPath } from 'node:url'
 import { dirname as _dirname, join } from 'node:path'
 const __dirname = _dirname(fileURLToPath(import.meta.url))
@@ -8,6 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import type { Page } from 'playwright/test'
 import { nanoid } from 'nanoid'
 import type { FastifyInstance } from 'fastify'
 
@@ -92,11 +93,23 @@ async function startServer(): Promise<E2EServer> {
   return server
 }
 
+/** 用例结束前断开浏览器侧 SSE fetch 与 Vue 订阅，避免阻塞 Fastify/context teardown */
+async function releaseBrowserPage(page: Page, baseUrl: string) {
+  await page.unrouteAll({ behavior: 'ignoreErrors' }).catch(() => undefined)
+  const origin = baseUrl.replace(/\/$/, '')
+  await page.route(`${origin}/**`, route => route.abort('failed')).catch(() => undefined)
+  await page.evaluate(() => {
+    const el = document.querySelector('#app') as (HTMLElement & { __vue_app__?: { unmount(): void } }) | null
+    el?.__vue_app__?.unmount()
+  }).catch(() => undefined)
+  await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5_000 }).catch(() => undefined)
+}
+
 export const test = base.extend<{ server: E2EServer, outlinePage: (docId: string, mode?: 'view' | 'edit') => Promise<Page> }>({
   server: async ({ page }, use) => {
     const s = await startServer()
     await use(s)
-    await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5_000 }).catch(() => undefined)
+    await releaseBrowserPage(page, s.baseUrl)
     await s.close()
   },
   // 打开大纲页签（默认编辑令牌）；mode='view' 走只读

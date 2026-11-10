@@ -1,9 +1,19 @@
 // PPTBase 大纲浏览器验收（plan §9 全 13 例 + 回归补例 14）。
 // 仅 PPTBASE_E2E=1 时执行（config testIgnore 保证），每用例独立临时 DATA_DIR。
 // 选择器优先用语义文本/稳定 class，避免依赖易变的 DOM 结构。
+import { mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test, expect, connectMcp, type E2EServer, type Page } from './fixtures'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import type { APIRequestContext } from 'playwright/test'
+
+const e2eScreenshotPath = (name: string) => {
+  const root = process.env.PPTBASE_E2E_OUT ?? join(tmpdir(), 'pptbase-e2e-artifacts')
+  const dir = join(root, 'screenshots')
+  mkdirSync(dir, { recursive: true })
+  return join(dir, name)
+}
 
 // ── 真实 SDK Client 复用会话调 MCP；callTool 直传 tools/call ──
 const outlineVersionOf = async (request: APIRequestContext, baseUrl: string, key: string, docId: string) => {
@@ -81,8 +91,7 @@ test('1. Agent 链接打开无幻灯片大纲，不陷入初始化', async ({ se
   await expect(page.locator('.outline-editor .ProseMirror')).toBeVisible()
   await expect(page.locator('text=数据初始化中')).not.toBeVisible({ timeout: 3_000 }).catch(() => undefined)
   await expect(page.locator('.outline-header .title')).toContainText('大纲协作')
-  const SHOTS = process.env.PPTBASE_E2E_OUT ?? '/home/dev/worklogs/pptbase-outlines/authorized-extra-round/playwright-results'
-  await p.screenshot({ path: `${SHOTS}/../screenshots/case1-major-flow.png`, fullPage: true })
+  await p.screenshot({ path: e2eScreenshotPath('case1-major-flow.png'), fullPage: true })
 })
 
 // ── 例2：格式/列表/中文输入(IME 事件)/粘贴/撤销重做/图片用途，保存刷新不丢 ──
@@ -231,21 +240,27 @@ test('3. 文字批注：前插字仍正确定位；删原文后显示脱离引�
   await p.keyboard.press('Control+Home')
   await p.keyboard.type('前缀插入 ')
   await expect(ed.locator('.thread-hl')).toContainText('目标语句')
-  // 删除被批注覆盖的原文 → 服务端标 detached，面板展示「已脱离」
-  const cur = await (await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline`)).json()
-  const para = cur.content.content[0] as { attrs: { blockId: string }, content?: { type: string, text?: string }[] }
-  const full = (para.content ?? []).map((c: { text?: string }) => c.text ?? '').join('')
-  const trimmed = full.replace(/目标语句/g, '')
-  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline/ops`, {
-    baseVersion: cur.version,
-    ops: [{
-      op: 'replaceBlock',
-      blockId: para.attrs.blockId,
-      block: { type: 'paragraph', attrs: para.attrs, content: trimmed ? [{ type: 'text', text: trimmed }] : [] },
-    }],
+  // 删除被批注覆盖的原文（UI：在 ProseMirror 内选区删除，非 REST）
+  await p.locator('.ProseMirror').evaluate(el => {
+    const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+    let node: Node | null
+    while ((node = tw.nextNode())) {
+      const t = node.textContent ?? ''
+      const i = t.indexOf('目标语句')
+      if (i < 0) continue
+      const range = document.createRange()
+      range.setStart(node, i)
+      range.setEnd(node, i + '目标语句'.length)
+      const sel = el.ownerDocument?.getSelection()
+      sel?.removeAllRanges()
+      sel?.addRange(range)
+      el.ownerDocument?.execCommand('delete')
+      return
+    }
+    throw new Error('目标语句 not found in editor')
   })
-  await p.reload()
-  await p.waitForSelector('.comments-panel .thread')
+  await ed.click()
+  await waitSaved(p)
   await expect(thread(p).first()).toContainText('已脱离', { timeout: 10_000 })
   await expect(thread(p).first()).toContainText('目标语句')
 })
@@ -306,8 +321,7 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   // 图片锚点线程的 anchor-desc 指向图片块
   await expect(p.locator('.comments-panel .anchor-desc').filter({ hasText: '图片' }).first()).toBeVisible()
   // 有内容态截图：正文+图片+多锚点批注线程
-  const SHOTS = process.env.PPTBASE_E2E_OUT ?? '/home/dev/worklogs/pptbase-outlines/authorized-extra-round/playwright-results'
-  await p.screenshot({ path: `${SHOTS}/../screenshots/case4-filled.png`, fullPage: true })
+  await p.screenshot({ path: e2eScreenshotPath('case4-filled.png'), fullPage: true })
 })
 
 // ── 例5：保存失败不可虚假成功；恢复后重试不重复记录 ──
@@ -673,8 +687,7 @@ test('13. 导航重连窄屏可用；旧 PPT 行为不回归', async ({ server, 
   const p = await outlinePage(doc.docId)
   const A = api(request, server.baseUrl, bearer(server.apiKey))
   const ed = editor(p)
-  const SHOTS = process.env.PPTBASE_E2E_OUT ?? '/home/dev/worklogs/pptbase-outlines/authorized-extra-round/playwright-results'
-  await p.screenshot({ path: `${SHOTS}/../screenshots/case13-loaded.png`, fullPage: true })
+  await p.screenshot({ path: e2eScreenshotPath('case13-loaded.png'), fullPage: true })
   // SSE 断线→重连：先注册拦截再 reload → 事件流建立即被断（真实断线态）；
   // 远端更新不可见；放行后退避重连 → onReconnect 独立 GET 补拉 → 批注可见
   await p.route('**/api/docs/*/events', r => r.abort())
@@ -701,7 +714,7 @@ test('13. 导航重连窄屏可用；旧 PPT 行为不回归', async ({ server, 
   // 窄屏：批注抽屉切换 + 截图
   await p.setViewportSize({ width: 480, height: 800 })
   await expect(p.locator('.comments-panel')).toBeVisible()
-  await p.screenshot({ path: `${SHOTS}/../screenshots/case13-narrow.png`, fullPage: true })
+  await p.screenshot({ path: e2eScreenshotPath('case13-narrow.png'), fullPage: true })
   await p.locator('.outline-header button.drawer-toggle').filter({ hasText: '批注' }).click()
   await expect(p.locator('.comments-panel')).not.toBeVisible()
   await p.setViewportSize({ width: 1280, height: 800 })

@@ -7,14 +7,16 @@
 // 运行：PPTBASE_E2E=1 npm --prefix server run e2e
 //       或 server/ 下 PPTBASE_E2E=1 npx playwright test -c e2e/playwright.config.ts
 import { fileURLToPath } from 'node:url'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { defineConfig, devices } from 'playwright/test'
 
 const OPT_IN = process.env.PPTBASE_E2E === '1'
 
 export default defineConfig({
   // 报告/截图/追踪一律落到仓库外（验收证据目录）
-  outputDir: process.env.PPTBASE_E2E_OUT ?? '/home/dev/worklogs/pptbase-outlines/authorized-extra-round/playwright-results',
+  // 追踪/附件默认写本机 tmp，避免慢挂载目录拖垮 30s fixture teardown（可用 PPTBASE_E2E_OUT 覆盖）
+  outputDir: process.env.PPTBASE_E2E_OUT ?? join(tmpdir(), 'pptbase-e2e-artifacts'),
   testDir: dirname(fileURLToPath(import.meta.url)),
   testMatch: '**/*.spec.ts',
   // 未 opt-in 时把全部用例标记为 skip —— 收集（collect/list）也不启动运行时
