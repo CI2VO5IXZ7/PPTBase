@@ -1,7 +1,7 @@
 // PPTBase 大纲浏览器验收（plan §9 全 13 例 + 回归补例 14）。
 // 仅 PPTBASE_E2E=1 时执行（config testIgnore 保证），每用例独立临时 DATA_DIR。
 // 选择器优先用语义文本/稳定 class，避免依赖易变的 DOM 结构。
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test, expect, connectMcp, type E2EServer, type Page } from './fixtures'
@@ -254,7 +254,9 @@ test('3. 文字批注：前插字仍正确定位；删原文后显示脱离引�
       const sel = el.ownerDocument?.getSelection()
       sel?.removeAllRanges()
       sel?.addRange(range)
-      el.ownerDocument?.execCommand('delete')
+      // 在真实选区上执行编辑命令。合成 Backspace 在先前默认 30s 跑次中不产生 PATCH，
+    // 因此这里不用 REST，也不把它称作系统键盘。
+    el.ownerDocument?.execCommand('delete')
       return
     }
     throw new Error('目标语句 not found in editor')
@@ -800,4 +802,89 @@ test('14. 丢弃归档草稿后继续编辑：断网离开时新编辑仍进草�
   await p.locator('button:has-text("复制草稿内容")').click()
   const clip = await p.evaluate(() => (navigator as unknown as { clipboard: { readText(): Promise<string> } }).clipboard.readText())
   expect(clip).toContain('DROP-OFFLINE-3')
+})
+
+test('15. 剪贴板粘贴写入正文并保存', async ({ server, outlinePage, page }) => {
+  const doc = await server.createDoc('paste')
+  await api(page.request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  await p.evaluate(async () => { await navigator.clipboard.writeText('PASTE-TOKEN-42') })
+  await ed.click()
+  await p.keyboard.press('Control+v')
+  await expect(ed).toContainText('PASTE-TOKEN-42')
+  await waitSaved(p)
+  const saved = await (await api(page.request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(JSON.stringify(saved.content)).toContain('PASTE-TOKEN-42')
+})
+
+test('16. 顶层下移：先保存再使 version 增加，首块上移禁用', async ({ server, outlinePage, page }) => {
+  const doc = await server.createDoc('move')
+  await api(page.request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  await ed.click()
+  await p.keyboard.type('MOVE-AAA')
+  await p.keyboard.press('Enter')
+  await p.keyboard.type('MOVE-BBB')
+  await waitSaved(p)
+  const before = await (await api(page.request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline`)).json()
+  await ed.locator('p').first().click()
+  await expect(p.locator('button[title="顶层区块上移"]')).toBeDisabled()
+  await ed.locator('p').nth(1).click()
+  const ops = p.waitForResponse(r => r.url().includes('/outline/ops') && r.request().method() === 'POST' && r.status() === 200)
+  await p.locator('button[title="顶层区块上移"]').click()
+  await ops
+  const after = await (await api(page.request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(after.version).toBeGreaterThan(before.version)
+  const texts = after.content.content.map((b: { content?: { text?: string }[] }) => (b.content ?? []).map(c => c.text ?? '').join(''))
+  expect(texts[0]).toContain('MOVE-BBB')
+  expect(texts[1]).toContain('MOVE-AAA')
+})
+
+test('17. 冲突下载成功才解锁；再次冲突必须重新确认', async ({ server, outlinePage, page }) => {
+  const doc = await server.createDoc('dl-ack')
+  const A = api(page.request, server.baseUrl, bearer(server.apiKey))
+  await A.post(`/api/docs/${doc.docId}/outline`, {})
+  const p = await outlinePage(doc.docId)
+  const ed = editor(p)
+  await p.route(`**/api/docs/${doc.docId}/outline`, async route => {
+    if (route.request().method() === 'PATCH') {
+      await new Promise(r => setTimeout(r, 500))
+      await route.continue()
+    }
+    else await route.continue()
+  })
+  const provoke = async (marker: string) => {
+    await ed.click()
+    await p.keyboard.type(marker)
+    await expect(p.locator('.save')).toContainText(/未保存|保存中/, { timeout: 5_000 })
+    const cur = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+    const id = cur.content.content[0].attrs.blockId
+    const ops = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
+      baseVersion: cur.version,
+      ops: [{ op: 'deleteBlocks', blockIds: [id] }],
+    })
+    expect(ops.status()).toBe(200)
+    await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 10_000 })
+  }
+  await provoke('DL-ONE')
+  const refresh = p.locator('button:has-text("刷新为最新版本")')
+  await expect(refresh).toBeDisabled()
+  const [download] = await Promise.all([
+    p.waitForEvent('download'),
+    p.locator('button:has-text("下载草稿 JSON")').click(),
+  ])
+  const file = readFileSync(await download.path(), 'utf8')
+  expect(file).toContain('DL-ONE')
+  expect(file).toContain('"content"')
+  await expect(refresh).toBeEnabled()
+  await refresh.click()
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
+  await provoke('DL-TWO')
+  await expect(refresh).toBeDisabled()
+  await p.locator('button:has-text("复制草稿内容")').click()
+  await expect(refresh).toBeEnabled()
+  await refresh.click()
+  await expect(p.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
 })
