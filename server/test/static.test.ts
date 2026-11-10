@@ -124,17 +124,17 @@ describe('静态前端托管', () => {
     expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
   })
 
-  it('路径穿越：编码 %2E%2E 不得读出 static root 外文件', async () => {
-    const res = await ctx.app.inject({
-      method: 'GET',
-      url: '/static/%2E%2E/outside-leak.txt',
-    })
-    expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
-    if (res.statusCode === 200) {
-      expect(res.body).not.toBe('console.log("bundle")')
-    }
-    else {
-      expect([403, 404]).toContain(res.statusCode)
+  it('路径穿越：编码 %2E%2E / %2e%2e 不得读出 static root 外文件', async () => {
+    for (const enc of ['/static/%2E%2E/outside-leak.txt', '/static/%2e%2e/outside-leak.txt']) {
+      const res = await ctx.app.inject({ method: 'GET', url: enc })
+      expect(res.body).not.toBe('SECRET_OUTSIDE_STATIC_ROOT')
+      expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
+      if (res.statusCode === 200) {
+        expect(res.body).not.toBe('console.log("bundle")')
+      }
+      else {
+        expect([403, 404]).toContain(res.statusCode)
+      }
     }
   })
 
