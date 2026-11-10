@@ -158,7 +158,8 @@ function refreshSelectionMeta() {
   for (const ref of idx.values()) {
     if (from >= ref.pos && from <= ref.pos + ref.node.nodeSize) {
       found = ref.blockId
-      top = view.state.doc.resolve(ref.pos).depth === 1
+      // blockIndex.pos 在节点之前。顶层区块在 doc 下，该位置 depth 为 0；嵌套区块更深。
+      top = view.state.doc.resolve(ref.pos).depth === 0
       break
     }
   }
