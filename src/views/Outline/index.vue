@@ -178,6 +178,12 @@ const saveText = computed(() => ({
 watch(() => outline.saveStatus, s => {
   if (s === 'conflict') conflictDraftPreserved.value = false
 })
+watch(() => outline.conflictRemote?.version, () => {
+  if (outline.saveStatus === 'conflict') conflictDraftPreserved.value = false
+})
+watch(() => outline.localDraft?.steps?.length, () => {
+  if (outline.saveStatus === 'conflict') conflictDraftPreserved.value = false
+})
 
 const onDocJson = (doc: Record<string, unknown>) => {
   sync.trackEditorDoc(doc)
@@ -364,35 +370,64 @@ const onDropDraft = () => {
   sync.dropDraft()
 }
 
-const copyDraft = async () => {
+const buildDraftPayload = () => {
   const d = outline.localDraft
-  if (!d) return
-  const payload = { content: d.content, steps: d.steps, savedAt: Date.now() }
+  if (!d) return null
+  return { content: d.content, steps: d.steps, savedAt: Date.now() }
+}
+
+const copyDraft = async () => {
+  const payload = buildDraftPayload()
+  if (!payload) return
   const text = JSON.stringify(payload, null, 2)
-  await navigator.clipboard?.writeText(text).catch(() => undefined)
-  conflictDraftPreserved.value = true
-  outline.lastError = '草稿已复制到剪贴板（JSON）'
+  if (!text.includes('"content"') || text.length < 10) return
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(text)
+    conflictDraftPreserved.value = true
+    outline.lastError = '草稿已复制到剪贴板（JSON）'
+  }
+  catch {
+    outline.lastError = '复制失败，请使用下载草稿 JSON'
+    conflictDraftPreserved.value = false
+  }
 }
 
 const downloadDraft = () => {
-  const d = outline.localDraft
-  if (!d) return
-  const payload = { content: d.content, steps: d.steps, savedAt: Date.now() }
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = `outline-draft-${documentStore.docId}.json`
-  a.click()
-  URL.revokeObjectURL(url)
-  conflictDraftPreserved.value = true
-  outline.lastError = '草稿已下载'
+  const payload = buildDraftPayload()
+  if (!payload) return
+  const text = JSON.stringify(payload, null, 2)
+  if (!text.includes('"content"')) return
+  try {
+    const blob = new Blob([text], { type: 'application/json' })
+    if (blob.size < 10) return
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `outline-draft-${documentStore.docId}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+    conflictDraftPreserved.value = true
+    outline.lastError = '草稿已下载'
+  }
+  catch {
+    outline.lastError = '下载失败'
+    conflictDraftPreserved.value = false
+  }
 }
 
 const onNavPpt = async (e: Event) => {
   e.preventDefault()
   editorRef.value?.flushNow()
-  if (!(await sync.drain())) {
+  const blocked = ['offline', 'dirty', 'saving', 'conflict'].includes(outline.saveStatus)
+  if (blocked || sync.hasUnsavedChanges()) {
+    const drained = await sync.drain()
+    if (!drained || blocked || sync.hasUnsavedChanges() || ['offline', 'dirty', 'conflict'].includes(outline.saveStatus)) {
+      leaveModalOpen.value = true
+      return
+    }
+  }
+  else if (!(await sync.drain())) {
     leaveModalOpen.value = true
     return
   }

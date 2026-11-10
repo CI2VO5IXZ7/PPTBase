@@ -24,6 +24,7 @@ export interface E2EServer {
   baseUrl: string
   apiKey: string
   userId: string
+  mcpClients: Client[]
   createDoc(title?: string): Promise<{ docId: string }>
   tokens(docId: string): { edit: string, view: string }
   docUrl(docId: string, tab?: 'outline' | 'ppt', mode?: 'view' | 'edit', token?: string): string
@@ -54,7 +55,7 @@ async function startServer(): Promise<E2EServer> {
   const { key } = createApiKey(db, userId, 'e2e')
 
   const server: E2EServer = {
-    app, db, config, dir, baseUrl, apiKey: key, userId,
+    app, db, config, dir, baseUrl, apiKey: key, userId, mcpClients: [],
     async createDoc(title = 'e2e-doc') {
       const res = await app.inject({
         method: 'POST', url: '/api/docs',
@@ -78,6 +79,10 @@ async function startServer(): Promise<E2EServer> {
       return `${baseUrl}/?doc=${docId}${tabQ}${modeQ}#t=${t}`
     },
     async close() {
+      for (const c of server.mcpClients) {
+        await c.close().catch(() => undefined)
+      }
+      server.mcpClients.length = 0
       // SSE 订阅/MCP 长连接会阻塞 app.close() → 先强制断开底层 socket
       app.server.closeAllConnections?.()
       await app.close()
@@ -88,9 +93,10 @@ async function startServer(): Promise<E2EServer> {
 }
 
 export const test = base.extend<{ server: E2EServer, outlinePage: (docId: string, mode?: 'view' | 'edit') => Promise<Page> }>({
-  server: async ({ page: _page }, use) => {
+  server: async ({ page }, use) => {
     const s = await startServer()
     await use(s)
+    await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5_000 }).catch(() => undefined)
     await s.close()
   },
   // 打开大纲页签（默认编辑令牌）；mode='view' 走只读
@@ -110,6 +116,7 @@ export async function connectMcp(server: E2EServer, key = server.apiKey): Promis
     new URL(`${server.baseUrl}/mcp`),
     { requestInit: { headers: { authorization: `Bearer ${key}` } } },
   ))
+  server.mcpClients.push(client)
   return client
 }
 

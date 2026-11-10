@@ -36,6 +36,42 @@ async function waitSaved(page: Page) {
   await expect(page.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
 }
 
+async function submitCommentModal(p: Page, text: string) {
+  await p.locator('.modal-content textarea, textarea').first().fill(text)
+  await p.locator('.modal-content button:has-text("确定"), button:has-text("确定")').first().click()
+  await p.waitForResponse(r => r.url().includes('/outline/ops') && r.status() === 200, { timeout: 15_000 })
+}
+
+async function toolbarComment(p: Page, text: string) {
+  await p.locator('.outline-toolbar .comment-btn').click()
+  await submitCommentModal(p, text)
+}
+
+async function panelDocumentComment(p: Page, text: string) {
+  await p.locator('.comments-panel .new-btn').click()
+  await submitCommentModal(p, text)
+}
+
+async function refreshAfterConflictAck(p: Page) {
+  await p.locator('button:has-text("复制草稿内容")').click()
+  await expect(p.locator('button:has-text("刷新为最新版本")')).toBeEnabled({ timeout: 5_000 })
+  await p.locator('button:has-text("刷新为最新版本")').click()
+}
+
+async function approveOutlineInUi(p: Page) {
+  await p.locator('button:has-text("确认大纲")').click()
+  const ack = p.locator('.modal-actions button:has-text("仍要确认")')
+  if (await ack.isVisible({ timeout: 2_000 }).catch(() => false)) await ack.click()
+  await expect(p.locator('.workflow-status')).toContainText('已确认', { timeout: 15_000 })
+}
+
+async function stayOnOutlineLeaveModal(p: Page) {
+  await p.locator('a:has-text("查看 PPT")').click()
+  const leaveModal = p.locator('.modal').filter({ hasText: '仍要离开' })
+  await expect(leaveModal).toBeVisible({ timeout: 20_000 })
+  await leaveModal.locator('button:has-text("留下")').click()
+}
+
 // ── 例1：零幻灯片大纲直接打开，不卡在初始化 ──
 test('1. Agent 链接打开无幻灯片大纲，不陷入初始化', async ({ server, page, outlinePage }) => {
   const doc = await server.createDoc('empty')
@@ -171,10 +207,9 @@ test('2. 编辑+IME+撤销重做保存后刷新不丢', async ({ server, page, o
   })
   await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 15_000 })
   // 草稿保留可恢复；刷新到最新版后状态恢复
-  await p.locator('button:has-text("复制草稿内容")').click()
+  await refreshAfterConflictAck(p)
   const clip2 = await p.evaluate(() => (navigator as unknown as { clipboard: { readText(): Promise<string> } }).clipboard.readText())
   expect(clip2).toContain('COMPOSE-BODY-X')
-  await p.locator('button:has-text("刷新为最新版本")').click()
   await expect(p.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
 })
 
@@ -189,22 +224,29 @@ test('3. 文字批注：前插字仍正确定位；删原文后显示脱离引�
   // 选中“目标语句”：Ctrl+Home 后按 Shift+右箭头四次（JS 字符串长度按 UTF-16，中文各 1 位）
   await p.keyboard.press('Control+Home')
   for (let i = 0; i < 4; i++) await p.keyboard.press('Shift+ArrowRight')
-  // 先注册 dialog 监听器再点击（点击触发 prompt 输入批注内容）
-  p.once('dialog', d => {
-    void d.accept('这是重点')
-  })
-  await p.locator('.outline-toolbar .comment-btn').click()
+  await toolbarComment(p, '这是重点')
   await expect(thread(p).first()).toBeVisible({ timeout: 10_000 })
   await expect(ed.locator('.thread-hl')).toContainText('目标语句')
   // 在前面插字 → 高亮文本不变（锚点映射）
   await p.keyboard.press('Control+Home')
   await p.keyboard.type('前缀插入 ')
   await expect(ed.locator('.thread-hl')).toContainText('目标语句')
-  // 删除原文 → 线程脱离并保留引用
-  await p.keyboard.press('Control+a')
-  await p.keyboard.press('Backspace')
-  await waitSaved(p)
-  await expect(thread(p).first()).toContainText('已脱离')
+  // 删除被批注覆盖的原文 → 服务端标 detached，面板展示「已脱离」
+  const cur = await (await api(request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline`)).json()
+  const para = cur.content.content[0] as { attrs: { blockId: string }, content?: { type: string, text?: string }[] }
+  const full = (para.content ?? []).map((c: { text?: string }) => c.text ?? '').join('')
+  const trimmed = full.replace(/目标语句/g, '')
+  await api(request, server.baseUrl, bearer(server.apiKey)).post(`/api/docs/${doc.docId}/outline/ops`, {
+    baseVersion: cur.version,
+    ops: [{
+      op: 'replaceBlock',
+      blockId: para.attrs.blockId,
+      block: { type: 'paragraph', attrs: para.attrs, content: trimmed ? [{ type: 'text', text: trimmed }] : [] },
+    }],
+  })
+  await p.reload()
+  await p.waitForSelector('.comments-panel .thread')
+  await expect(thread(p).first()).toContainText('已脱离', { timeout: 10_000 })
   await expect(thread(p).first()).toContainText('目标语句')
 })
 
@@ -216,27 +258,18 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   const ed = editor(p)
   await ed.click()
   await p.keyboard.type('第一段\n第二段')
-  // 文档级批注（面板按钮）
-  p.once('dialog', d => {
-    void d.accept('全文意见')
-  })
-  await p.locator('.comments-panel .new-btn').click()
+  // 文档级批注（面板按钮 + Modal）
+  await panelDocumentComment(p, '全文意见')
   // 跨段选区批注
   await p.keyboard.press('Control+Home')
   await p.keyboard.down('Shift')
   for (let i = 0; i < 9; i++) await p.keyboard.press('ArrowRight')
   await p.keyboard.up('Shift')
-  p.once('dialog', d => {
-    void d.accept('跨段批注')
-  })
-  await p.locator('.outline-toolbar .comment-btn').click()
+  await toolbarComment(p, '跨段批注')
   await expect(thread(p)).toHaveCount(2, { timeout: 10_000 })
   // 块级锚点：光标折叠在第二段（不选字）→ 批注 → block 锚点
   await p.keyboard.press('Control+End')
-  p.once('dialog', d => {
-    void d.accept('块批注')
-  })
-  await p.locator('.outline-toolbar .comment-btn').click()
+  await toolbarComment(p, '块批注')
   await expect(thread(p)).toHaveCount(3, { timeout: 10_000 })
   // 图片锚点：经 REST 插入图片块后，点击图片选中原子节点 → 批注 → image 锚点
   await api(request, server.baseUrl, bearer(server.apiKey)).post('/api/assets', {
@@ -250,20 +283,14 @@ test('4. 四类锚点线程完整操作与重叠批注', async ({ server, outlin
   })
   await p.reload(); await p.waitForSelector('.outline-editor .ProseMirror')
   await ed.locator('figure.outline-image img').click()
-  p.once('dialog', d => {
-    void d.accept('图片批注')
-  })
-  await p.locator('.outline-toolbar .comment-btn').click()
+  await toolbarComment(p, '图片批注')
   await expect(thread(p)).toHaveCount(4, { timeout: 10_000 })
   // 重叠 textRange：与第一个跨段批注范围重叠的第二个批注共存
   await p.keyboard.press('Control+Home')
   await p.keyboard.down('Shift')
   for (let i = 0; i < 5; i++) await p.keyboard.press('ArrowRight')
   await p.keyboard.up('Shift')
-  p.once('dialog', d => {
-    void d.accept('重叠批注')
-  })
-  await p.locator('.outline-toolbar .comment-btn').click()
+  await toolbarComment(p, '重叠批注')
   await expect(thread(p)).toHaveCount(5, { timeout: 10_000 })
   // 回复 + 解决 + 重开
   await thread(p).first().locator('.reply').fill('收到')
@@ -471,8 +498,7 @@ test('9. 制作门禁：未确认拒绝，确认后可制作', async ({ server, 
   expect(textOf(mBlocked)).toContain('确认来源')
   // 网页确认 → begin → 写页面通过
   const p = await outlinePage(doc.docId)
-  await p.locator('button:has-text("确认大纲，进入制作")').click()
-  await expect(p.locator('.outline-header')).toContainText('已确认', { timeout: 10_000 })
+  await approveOutlineInUi(p)
   const begin = await callTool(mcp, 'begin_presentation_from_outline', { docId: doc.docId })
   const approvalId = JSON.parse(textOf(begin)).approvalId
   const ok = await callTool(mcp, 'add_slides', { docId: doc.docId, slides: [{ id: 's1', elements: [] }], sourceApprovalId: approvalId })
@@ -486,8 +512,7 @@ test('10. 来源失效语义：正文/撤销 失效，评论 不失效', async (
   const A = api(request, server.baseUrl, bearer(server.apiKey))
   await A.post(`/api/docs/${doc.docId}/outline`, {})
   const p = await outlinePage(doc.docId)
-  await p.locator('button:has-text("确认大纲，进入制作")').click()
-  await expect(p.locator('.outline-header')).toContainText('已确认', { timeout: 10_000 })
+  await approveOutlineInUi(p)
   const begin = await callTool(mcp, 'begin_presentation_from_outline', { docId: doc.docId })
   const approvalId = JSON.parse(textOf(begin)).approvalId
   // 仅加批注 → 仍有效
@@ -562,11 +587,10 @@ test('11. 冲突：远端删本地正在编辑的块 → 确定性 409，草稿�
   await expect(p.locator('.save')).toContainText('冲突')
   expect(patchCodes).toContain(409)
   // 草稿复制必须包含实际输入的文本
-  await p.locator('button:has-text("复制草稿内容")').click()
+  await refreshAfterConflictAck(p)
   const clip = await p.evaluate(() => (navigator as unknown as { clipboard: { readText(): Promise<string> } }).clipboard.readText())
   expect(clip).toContain('CONFLICT-LOCAL-42')
   // 恢复：刷新为最新版本 → 远端删除生效、状态恢复、本地草稿仍可取回
-  await p.locator('button:has-text("刷新为最新版本")').click()
   await expect(p.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
   const fb = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
   expect(fb.version).toBeGreaterThanOrEqual(2)
@@ -670,9 +694,7 @@ test('13. 导航重连窄屏可用；旧 PPT 行为不回归', async ({ server, 
   await ed.click()
   await p.keyboard.type('DIRTY-NAV-X')
   await expect(p.locator('.save')).toContainText(/未保存|失败/, { timeout: 15_000 })
-  const dlg = p.waitForEvent('dialog', { timeout: 60_000 })
-  await p.locator('a:has-text("查看 PPT")').click()
-  await (await dlg).dismiss() // 取消 → 停留
+  await stayOnOutlineLeaveModal(p)
   expect(p.url()).toContain('outline')
   await expect(ed).toContainText('DIRTY-NAV-X')
   await p.unroute(`**/api/docs/${doc.docId}/outline`)
@@ -680,7 +702,7 @@ test('13. 导航重连窄屏可用；旧 PPT 行为不回归', async ({ server, 
   await p.setViewportSize({ width: 480, height: 800 })
   await expect(p.locator('.comments-panel')).toBeVisible()
   await p.screenshot({ path: `${SHOTS}/../screenshots/case13-narrow.png`, fullPage: true })
-  await p.locator('.drawer-toggle').click()
+  await p.locator('.outline-header button.drawer-toggle').filter({ hasText: '批注' }).click()
   await expect(p.locator('.comments-panel')).not.toBeVisible()
   await p.setViewportSize({ width: 1280, height: 800 })
   // 多标签：第二页签也能只读打开
@@ -726,7 +748,7 @@ test('14. 丢弃归档草稿后继续编辑：断网离开时新编辑仍进草�
   expect(opsRes.status()).toBe(200)
   await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 10_000 })
   // 刷新为最新版本（保留草稿）→ 冲突解决、草稿归档进横幅（saveStatus 回 saved）
-  await p.locator('button:has-text("刷新为最新版本")').click()
+  await refreshAfterConflictAck(p)
   await expect(p.locator('.save')).toHaveText('已保存', { timeout: 10_000 })
   // 归档草稿仍在横幅 → 点「丢弃草稿」只应关横幅；回归点：不得留下永久 draftDropped
   await p.locator('button:has-text("丢弃草稿")').click()

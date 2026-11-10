@@ -436,6 +436,6 @@ export class OutlineSyncCore {
     return this.queue.size > 0 || this.queue.inFlight
   }
   get hasUnsaved() {
-    return this.queue.size > 0 || this.buffered || this.status === 'saving' || this.status === 'dirty'
+    return this.queue.size > 0 || this.buffered || this.status === 'saving' || this.status === 'dirty' || this.status === 'offline'
   }
 }
