@@ -2,36 +2,54 @@
   <div class="outline-page">
     <header class="outline-header">
       <div class="title">大纲协作</div>
+      <OutlineWorkflowStatus
+        class="workflow"
+        :approval="outline.status?.approval"
+        :generation="outline.status?.generation"
+      />
       <div class="meta">
         <span>v{{ outline.version }} / c{{ outline.contentVersion }}</span>
         <span :class="['save', outline.saveStatus]">{{ saveText }}</span>
         <span v-if="outline.lastError" class="err">{{ outline.lastError }}</span>
         <span v-if="submittedInfo" class="pending">{{ submittedInfo }}</span>
-        <span v-if="outline.status?.approval?.valid" class="approved">已确认版本 {{ outline.status.approval.contentVersion }}</span>
-        <span v-else-if="outline.status?.approval" class="stale">确认已偏离，请重新确认</span>
-        <span v-if="outline.status?.generation" :class="outline.status.generation.stale ? 'stale' : 'approved'">
-          制作来源{{ outline.status.generation.stale ? '已失效' : `有效（确认稿 c${outline.status.generation.contentVersion}）` }}
-        </span>
       </div>
       <div class="actions">
+        <button v-if="isNarrow" type="button" class="btn drawer-toggle" @click="navOpen = !navOpen">树</button>
         <button class="btn drawer-toggle" @click="drawerOpen = !drawerOpen">
           批注<span v-if="outline.openThreads">({{ outline.openThreads }})</span>
         </button>
         <a class="btn" :href="pptUrl" @click="onNavPpt">查看 PPT</a>
         <template v-if="!outline.readonly">
           <button class="btn" :disabled="!canAct" @click="onSubmitFeedback">提交反馈</button>
-          <button v-if="!outline.status?.approval?.valid" class="btn primary" :disabled="!canAct" @click="onApprove">确认大纲，进入制作</button>
+          <button v-if="!outline.status?.approval?.valid" class="btn primary" :disabled="!canAct" @click="onApprove">确认大纲</button>
           <button v-else class="btn" :disabled="!canAct" @click="onRevoke">撤销确认</button>
         </template>
       </div>
     </header>
 
     <div v-if="outline.saveStatus === 'conflict' || outline.localDraft" class="banner conflict">
-      <template v-if="outline.saveStatus === 'conflict'">版本冲突：远端已到 v{{ outline.conflictRemote?.version }}（c{{ outline.conflictRemote?.contentVersion }}）。</template>
-      本地未提交修改已保存为草稿（{{ draftSteps }} 步），不会自动丢弃。
-      <button v-if="outline.saveStatus === 'conflict'" class="btn" :disabled="resolving" @click="onDiscardDraft">刷新为最新版本（保留草稿）</button>
-      <button v-if="outline.localDraft" class="btn" @click="copyDraft">复制草稿内容</button>
-      <button v-if="outline.localDraft" class="btn" @click="onDropDraft">丢弃草稿</button>
+      <template v-if="outline.saveStatus === 'conflict'">
+        <strong>版本冲突：</strong>服务器版本与本地未同步写入不一致，编辑已锁定。
+        远端已到 v{{ outline.conflictRemote?.version }}（c{{ outline.conflictRemote?.contentVersion }}）。
+      </template>
+      <p class="conflict-note">
+        本地草稿不会自动丢弃。请先<strong>复制或下载 JSON</strong>后再刷新为最新版本；不会自动重放失败的上移/下移等 ops。
+      </p>
+      <div class="conflict-actions">
+        <button v-if="outline.localDraft" type="button" class="btn" @click="copyDraft">复制草稿内容</button>
+        <button v-if="outline.localDraft" type="button" class="btn" @click="downloadDraft">下载草稿 JSON</button>
+        <button
+          v-if="outline.saveStatus === 'conflict'"
+          type="button"
+          class="btn"
+          :disabled="resolving || !conflictDraftPreserved"
+          @click="onDiscardDraft"
+        >
+          刷新为最新版本（保留草稿）
+        </button>
+        <button v-if="outline.localDraft" type="button" class="btn" @click="onDropDraft">丢弃草稿</button>
+      </div>
+      <p v-if="outline.saveStatus === 'conflict' && !conflictDraftPreserved" class="ack-hint">刷新前请先复制或下载草稿。</p>
     </div>
     <div v-else-if="outline.saveStatus === 'offline'" class="banner">
       保存失败：{{ outline.lastError }}。修改已保留，恢复后会自动重试。
@@ -40,16 +58,27 @@
     <div v-else-if="outline.uploadsPending" class="banner warn">图片上传中或失败，先完成/重试再提交反馈或确认。</div>
 
     <main class="outline-main">
+      <OutlineNavigator
+        v-show="!isNarrow || navOpen"
+        class="nav-col"
+        :content="editorContent"
+        :active-block-id="activeBlockId"
+        @navigate="onNavBlock"
+      />
       <OutlineEditor
         ref="editorRef"
+        class="editor-col"
         :readonly="outline.readonly || resolving"
         :threads="outline.threads"
         :content="editorContent"
         :suspend-refresh="suspendRefresh"
         @steps="onSteps"
         @comment-range="onCommentRange"
+        @request-link="linkModalOpen = true"
+        @request-move="onMoveBlock"
+        @selection-block="onSelectionBlock"
         @composing="sync.setComposing"
-        @doc-json="sync.trackEditorDoc"
+        @doc-json="onDocJson"
       />
       <CommentsPanel
         v-show="drawerOpen"
@@ -59,22 +88,54 @@
         :readonly="outline.readonly"
         @op="onThreadOp"
         @locate="onLocate"
+        @request-add-comment="onRequestDocComment"
       />
     </main>
+
+    <CommentComposerModal
+      :visible="commentModalOpen"
+      @submit="onCommentModalSubmit"
+      @cancel="commentModalOpen = false"
+    />
+    <LinkModal
+      :visible="linkModalOpen"
+      @submit="onLinkSubmit"
+      @cancel="linkModalOpen = false"
+    />
+    <Modal :visible="approveConfirmOpen" :width="440" @update:visible="v => !v && (approveConfirmOpen = false)">
+      <p>{{ approveConfirmText }}</p>
+      <div class="modal-actions">
+        <button type="button" class="btn" @click="approveConfirmOpen = false">取消</button>
+        <button type="button" class="btn primary" @click="onApproveAckThreads">仍要确认</button>
+      </div>
+    </Modal>
+    <Modal :visible="leaveModalOpen" :width="400" @update:visible="v => !v && (leaveModalOpen = false)">
+      <p>有未保存内容或保存失败，仍要离开？</p>
+      <div class="modal-actions">
+        <button type="button" class="btn" @click="leaveModalOpen = false">留下</button>
+        <button type="button" class="btn primary" @click="confirmLeavePpt">离开</button>
+      </div>
+    </Modal>
   </div>
 </template>
 
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { nanoid } from 'nanoid'
+import Modal from '@/components/Modal.vue'
 import { useDocumentStore } from '@/store/document'
 import { useOutlineStore } from '@/store/outline'
 import useOutlineSync from '@/hooks/useOutlineSync'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
 import { outlineActionBlocked } from '@/utils/outline/submitGate'
+import { topLevelBlockIds } from '@/utils/outline/navigatorTree'
 import { submitOutlineFeedback, approveOutline, revokeOutlineApproval, postOutlineOps } from '@/services/outline'
 import OutlineEditor from './OutlineEditor.vue'
 import CommentsPanel from './CommentsPanel.vue'
+import OutlineNavigator from './OutlineNavigator.vue'
+import OutlineWorkflowStatus from './OutlineWorkflowStatus.vue'
+import CommentComposerModal from './CommentComposerModal.vue'
+import LinkModal from './LinkModal.vue'
 
 const documentStore = useDocumentStore()
 const outline = useOutlineStore()
@@ -82,14 +143,23 @@ const sync = useOutlineSync()
 const editorRef = ref<InstanceType<typeof OutlineEditor>>()
 const busy = ref(false)
 const drawerOpen = ref(true)
+const navOpen = ref(false)
+const isNarrow = ref(false)
 const editorContent = ref<Record<string, unknown> | null>(null)
 const suspendRefresh = ref(false)
-// resolveConflict 期间禁编：杜绝 getState 在途时产生基于旧文档的新 steps 以新 baseVersion 发出
 const resolving = ref(false)
+const activeBlockId = ref<string | null>(null)
+const conflictDraftPreserved = ref(false)
+
+const commentModalOpen = ref(false)
+const pendingCommentAnchor = ref<OutlineAnchorSpec | null>(null)
+const linkModalOpen = ref(false)
+const approveConfirmOpen = ref(false)
+const approveConfirmText = ref('')
+const leaveModalOpen = ref(false)
 
 const pptUrl = computed(() => `/?doc=${documentStore.docId}#t=${documentStore.token}`)
 const draftSteps = computed(() => outline.localDraft?.steps.length ?? 0)
-// 最新一轮提交 vs 当前内容版本：区分“已提交到 cX”与“其后还有未提交修改”
 const submittedInfo = computed(() => {
   const last = outline.submissions[0]
   if (!last) return ''
@@ -105,17 +175,35 @@ const saveText = computed(() => ({
   saved: '已保存', saving: '保存中…', dirty: '未保存', offline: '保存失败', conflict: '版本冲突',
 } as Record<string, string>)[outline.saveStatus])
 
+watch(() => outline.saveStatus, s => {
+  if (s === 'conflict') conflictDraftPreserved.value = false
+})
+
+const onDocJson = (doc: Record<string, unknown>) => {
+  sync.trackEditorDoc(doc)
+  if (!sync.hasUnsavedChanges()) editorContent.value = doc
+}
+
+const onSelectionBlock = (id: string | null) => {
+  activeBlockId.value = id
+}
+
+const onNavBlock = (blockId: string) => {
+  editorRef.value?.scrollToBlockId(blockId)
+  navOpen.value = false
+}
+
 const onSteps = (steps: Record<string, unknown>[]) => {
   sync.enqueueSteps(steps)
 }
 
-const onThreadOp = async (op: Record<string, unknown>) => {
+const postOps = async (op: Record<string, unknown>) => {
   if (outline.readonly) return
-  // 先冲刷编辑器 300ms 缓冲（打字后秒按批注也不能丢/错基线），再 drain
   editorRef.value?.flushNow()
   await Promise.resolve()
   if (!(await sync.drain())) {
-    outline.lastError = '请先解决未保存/冲突内容'; return
+    outline.lastError = '请先解决未保存/冲突内容'
+    return
   }
   busy.value = true
   try {
@@ -125,37 +213,75 @@ const onThreadOp = async (op: Record<string, unknown>) => {
   }
   catch (err) {
     const e = err as { message?: string }
-    outline.lastError = e.message ?? '批注操作失败'
+    outline.lastError = e.message ?? '操作失败'
   }
   finally {
     busy.value = false
   }
 }
 
+const onThreadOp = (op: Record<string, unknown>) => void postOps(op)
+
+const onMoveBlock = async ({ blockId, direction }: { blockId: string, direction: 'up' | 'down' }) => {
+  if (outline.readonly || outline.saveStatus === 'conflict') return
+  const ids = topLevelBlockIds(editorContent.value)
+  const i = ids.indexOf(blockId)
+  if (i < 0) return
+  const op: Record<string, unknown> = { op: 'moveBlock', blockId }
+  if (direction === 'up') {
+    if (i === 0) return
+    op.before = ids[i - 1]
+  }
+  else {
+    if (i >= ids.length - 1) return
+    op.after = ids[i + 1]
+  }
+  await postOps(op)
+}
+
 const onLocate = (t: OutlineThread) => {
-  // 定位该线程自身的高亮；脱离/无文档高亮时回退到面板中该线程条目
   const target = document.querySelector(`.ProseMirror [data-thread-id="${t.id}"]`)
     ?? document.querySelector(`.comments-panel [data-thread-id="${t.id}"]`)
   target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
+
 const onCommentRange = (anchor: OutlineAnchorSpec) => {
-  const content = window.prompt('批注内容')
-  if (!content) return
-  void onThreadOp({ op: 'addComment', anchor, content })
+  pendingCommentAnchor.value = anchor
+  commentModalOpen.value = true
+}
+
+const onRequestDocComment = () => {
+  pendingCommentAnchor.value = { kind: 'document' }
+  commentModalOpen.value = true
+}
+
+const onCommentModalSubmit = (text: string) => {
+  commentModalOpen.value = false
+  const anchor = pendingCommentAnchor.value
+  pendingCommentAnchor.value = null
+  if (!anchor) return
+  void postOps({ op: 'addComment', anchor, content: text })
+}
+
+const onLinkSubmit = (href: string) => {
+  linkModalOpen.value = false
+  editorRef.value?.applyLinkHref(href)
 }
 
 const guard = async () => {
   editorRef.value?.flushNow()
-  await Promise.resolve() // 让 flushNow 同步 emit 的 steps 先进入队列
+  await Promise.resolve()
   if (outline.uploadsPending) {
-    outline.lastError = '有图片上传未完成'; return false
+    outline.lastError = '有图片上传未完成'
+    return false
   }
   return sync.drain()
 }
 
 const onSubmitFeedback = async () => {
   if (!(await guard())) {
-    outline.lastError = '内容未保存完成，暂不能提交'; return
+    outline.lastError = '内容未保存完成，暂不能提交'
+    return
   }
   busy.value = true
   try {
@@ -172,7 +298,8 @@ const onSubmitFeedback = async () => {
 
 const onApprove = async () => {
   if (!(await guard())) {
-    outline.lastError = '内容未保存完成，暂不能确认'; return
+    outline.lastError = '内容未保存完成，暂不能确认'
+    return
   }
   busy.value = true
   try {
@@ -183,12 +310,25 @@ const onApprove = async () => {
     const e = err as { status?: number, issues?: { openThreads?: number }, message?: string }
     if (e.status === 409 && (e.issues as { openThreads?: number })?.openThreads) {
       const n = (e.issues as { openThreads: number }).openThreads
-      if (window.confirm(`还有 ${n} 条未解决批注，仍确认当前版本进入制作？`)) {
-        await approveOutline(documentStore.docId, { baseVersion: outline.version, requestId: nanoid(16), acknowledgeOpenThreads: true })
-        await sync.refresh()
-      }
+      approveConfirmText.value = `还有 ${n} 条未解决批注，仍确认当前版本进入制作？`
+      approveConfirmOpen.value = true
     }
     else outline.lastError = e.message ?? '确认失败'
+  }
+  finally {
+    busy.value = false
+  }
+}
+
+const onApproveAckThreads = async () => {
+  approveConfirmOpen.value = false
+  busy.value = true
+  try {
+    await approveOutline(documentStore.docId, { baseVersion: outline.version, requestId: nanoid(16), acknowledgeOpenThreads: true })
+    await sync.refresh()
+  }
+  catch (err) {
+    outline.lastError = (err as { message?: string }).message ?? '确认失败'
   }
   finally {
     busy.value = false
@@ -206,55 +346,75 @@ const onRevoke = async () => {
   }
 }
 
-// 冲突：刷新为最新版本，本地草稿保留可复制
 const onDiscardDraft = async () => {
-  // 在途 resolve 不得再触发新一次：core 虽有纪元丢弃兜底，按钮禁用+此守卫避免
-  // 无意义的重叠 GET（旧纪元结果会被整体丢弃）
-  if (resolving.value) return
-  // 先禁编再冲刷：解决期间（getState 在途）不得再产生基于旧文档的新 steps
+  if (resolving.value || !conflictDraftPreserved.value) return
   resolving.value = true
   try {
     editorRef.value?.flushNow()
-    await Promise.resolve() // 让 flushNow 同步 emit 的 steps 先并入草稿，避免旧基线 steps 以远端新 baseVersion 发出
+    await Promise.resolve()
     await sync.resolveConflict()
   }
   finally {
     resolving.value = false
   }
 }
+
 const onDropDraft = () => {
   outline.dropDraft()
   sync.dropDraft()
 }
+
 const copyDraft = async () => {
   const d = outline.localDraft
   if (!d) return
-  const text = JSON.stringify(d.content, null, 2)
+  const payload = { content: d.content, steps: d.steps, savedAt: Date.now() }
+  const text = JSON.stringify(payload, null, 2)
   await navigator.clipboard?.writeText(text).catch(() => undefined)
+  conflictDraftPreserved.value = true
   outline.lastError = '草稿已复制到剪贴板（JSON）'
 }
 
-// 导航到 PPT 前 flush 未保存内容
+const downloadDraft = () => {
+  const d = outline.localDraft
+  if (!d) return
+  const payload = { content: d.content, steps: d.steps, savedAt: Date.now() }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `outline-draft-${documentStore.docId}.json`
+  a.click()
+  URL.revokeObjectURL(url)
+  conflictDraftPreserved.value = true
+  outline.lastError = '草稿已下载'
+}
+
 const onNavPpt = async (e: Event) => {
   e.preventDefault()
   editorRef.value?.flushNow()
   if (!(await sync.drain())) {
-    if (window.confirm('有未保存内容或保存失败，仍要离开？')) window.location.href = pptUrl.value
+    leaveModalOpen.value = true
     return
   }
   window.location.href = pptUrl.value
 }
 
-// 关闭前处理未保存内容（flush 尽力而为 + 警告）
+const confirmLeavePpt = () => {
+  leaveModalOpen.value = false
+  window.location.href = pptUrl.value
+}
+
 const onBeforeUnload = (e: BeforeUnloadEvent) => {
   editorRef.value?.flushNow()
   void sync.flush()
   if (sync.hasUnsavedChanges()) {
-    e.preventDefault(); e.returnValue = ''
+    e.preventDefault()
+    e.returnValue = ''
   }
 }
 
-// 有未保存内容或 IME 中：挂起远端刷新，避免重建编辑器打断输入
+const mq = () => { isNarrow.value = window.matchMedia('(max-width: 860px)').matches }
+
 watch(() => outline.saveStatus, s => {
   suspendRefresh.value = s === 'dirty' || s === 'saving' || s === 'conflict'
 }, { immediate: true })
@@ -263,6 +423,8 @@ watch(() => outline.content, c => {
 }, { deep: false })
 
 onMounted(async () => {
+  mq()
+  window.addEventListener('resize', mq)
   try {
     await sync.init()
     editorContent.value = outline.content
@@ -272,15 +434,15 @@ onMounted(async () => {
     outline.lastError = '大纲加载失败'
   }
 })
-// 卸载兜底：drain 最多等 3s，超时仍先存草稿再 destroy，不阻塞组件销毁
+
 const DRAIN_TIMEOUT_MS = 3000
 onBeforeUnmount(() => {
+  window.removeEventListener('resize', mq)
   window.removeEventListener('beforeunload', onBeforeUnload)
   void (async () => {
     editorRef.value?.flushNow()
-    await Promise.resolve() // 让 flushNow 同步 emit 的 steps 先进入队列
+    await Promise.resolve()
     await Promise.race([sync.drain(), new Promise(resolve => setTimeout(resolve, DRAIN_TIMEOUT_MS))])
-    // drain 后仍剩未提交步骤：本地草稿+待处理步骤存 store 草稿，destroy 清队列不丢数据
     if (sync.pendingCount()) sync.preservePending()
     sync.destroy()
   })()
@@ -290,15 +452,14 @@ onBeforeUnmount(() => {
 <style lang="scss" scoped>
 .outline-page { height: 100%; display: flex; flex-direction: column; }
 .outline-header {
-  display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+  display: flex; align-items: flex-start; gap: 12px; padding: 8px 16px;
   border-bottom: 1px solid #e5e5e5; flex-wrap: wrap;
   .title { font-size: 16px; font-weight: 600; }
-  .meta { flex: 1; display: flex; gap: 10px; font-size: 12px; color: #666; flex-wrap: wrap; }
+  .workflow { flex: 0 0 auto; }
+  .meta { flex: 1 1 200px; display: flex; gap: 10px; font-size: 12px; color: #666; flex-wrap: wrap; align-items: center; }
   .save.dirty, .save.offline, .save.conflict, .err { color: #d97706; }
-  .approved { color: #059669; }
-  .stale { color: #d97706; }
 }
-.actions { display: flex; gap: 8px; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .btn {
   font-size: 13px; padding: 4px 12px; border: 1px solid #d4d4d4; border-radius: 4px;
   background: #fff; cursor: pointer; text-decoration: none; color: #333;
@@ -306,8 +467,13 @@ onBeforeUnmount(() => {
   &:disabled { opacity: 0.5; cursor: default; }
 }
 .banner { padding: 8px 16px; background: #fef3c7; font-size: 13px; &.conflict { background: #fee2e2; } &.warn { background: #fef9c3; } }
+.conflict-note { margin: 6px 0; font-size: 12px; line-height: 1.5; }
+.conflict-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.ack-hint { font-size: 12px; color: #b45309; margin: 6px 0 0; }
 .outline-main { flex: 1; display: flex; min-height: 0; }
+.editor-col { flex: 1; min-width: 0; }
 .panel { width: 300px; border-left: 1px solid #e5e5e5; flex-shrink: 0; }
+.modal-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
 @media (max-width: 860px) {
   .panel { position: fixed; right: 0; top: 0; bottom: 0; z-index: 20; background: #fff; box-shadow: -2px 0 8px rgba(0,0,0,.12); }
 }

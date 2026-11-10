@@ -9,7 +9,7 @@
         <option value="detached">已脱离</option>
       </select>
     </div>
-    <button v-if="!readonly" class="new-btn" @click="addDocComment">＋ 文档级批注</button>
+    <button v-if="!readonly" class="new-btn" @click="$emit('request-add-comment', { kind: 'document' })">＋ 添加批注</button>
 
     <div v-if="submissions?.length" class="submissions">
       <div class="sub-head">反馈历史</div>
@@ -45,7 +45,11 @@ import { computed, reactive, ref } from 'vue'
 import type { OutlineSubmission, OutlineThread } from '@/types/outline'
 
 const props = defineProps<{ threads: OutlineThread[], submissions?: OutlineSubmission[], readonly: boolean }>()
-const emit = defineEmits<{ op: [op: Record<string, unknown>], locate: [thread: OutlineThread] }>()
+const emit = defineEmits<{
+  op: [op: Record<string, unknown>]
+  locate: [thread: OutlineThread]
+  'request-add-comment': [anchor: { kind: 'document' }]
+}>()
 
 const filter = ref('all')
 const replies = reactive<Record<string, string>>({})
@@ -77,11 +81,6 @@ const reply = (t: OutlineThread) => {
 }
 const setStatus = (t: OutlineThread, status: 'resolved' | 'open') =>
   emit('op', { op: 'setThreadStatus', threadId: t.id, status })
-const addDocComment = () => {
-  const content = window.prompt('批注内容')
-  if (!content) return
-  emit('op', { op: 'addComment', anchor: { kind: 'document' }, content })
-}
 </script>
 
 <style lang="scss" scoped>

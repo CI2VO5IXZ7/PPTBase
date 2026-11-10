@@ -4,6 +4,8 @@
       <template v-for="b in toolbar" :key="b.label">
         <button :class="{ active: b.active?.() }" :title="b.title" @click="b.run">{{ b.label }}</button>
       </template>
+      <button :disabled="!canMoveUp" title="顶层区块上移" @click="emitMove('up')">上移</button>
+      <button :disabled="!canMoveDown" title="顶层区块下移" @click="emitMove('down')">下移</button>
       <button class="comment-btn" :disabled="!canComment" title="对当前选区/区块加批注" @click="commentSelection">批注</button>
       <button class="pick-btn" :disabled="uploading" @click="pickImages">{{ uploading ? '上传中…' : '插入图片' }}</button>
     </div>
@@ -30,7 +32,7 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useOutlineStore } from '@/store/outline'
-import { EditorState, NodeSelection, PluginKey, type Command } from 'prosemirror-state'
+import { EditorState, NodeSelection, TextSelection, PluginKey, type Command } from 'prosemirror-state'
 import type { Step } from 'prosemirror-transform'
 import { EditorView } from 'prosemirror-view'
 import { createThreadDecoPlugin } from '@/utils/outline/threadDeco'
@@ -43,7 +45,9 @@ import { splitListItem, liftListItem, sinkListItem, wrapInList } from 'prosemirr
 import { nanoid } from 'nanoid'
 import { outlineViewSchema } from '@/utils/outline/viewSchema'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
+import { blockIndex } from '@/utils/outline/anchors'
 import { selectionToAnchorSpec } from '@/utils/outline/anchorSpec'
+import { topLevelBlockIds } from '@/utils/outline/navigatorTree'
 import { uploadAsset } from '@/services/document'
 import { useDocumentStore } from '@/store/document'
 
@@ -56,6 +60,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   steps: [steps: Record<string, unknown>[]]
   'comment-range': [anchor: OutlineAnchorSpec]
+  'request-link': []
+  'request-move': [payload: { blockId: string, direction: 'up' | 'down' }]
+  'selection-block': [blockId: string | null, topLevel: boolean]
   composing: [v: boolean]
   'doc-json': [doc: Record<string, unknown>]
 }>()
@@ -66,6 +73,10 @@ const editorRef = ref<HTMLElement>()
 const uploads = ref<{ id: string, name: string, file: File, status: 'uploading' | 'error' | 'done', error?: string }[]>([])
 const imageSel = ref<{ pos: number, blockId: string, caption: string, usage: string, usageDescription: string } | null>(null)
 const canComment = ref(true)
+const selectedTopBlock = ref<string | null>(null)
+const isTopLevel = ref(false)
+const canMoveUp = computed(() => !props.readonly && isTopLevel.value && selectedTopBlock.value && moveNeighbor('up'))
+const canMoveDown = computed(() => !props.readonly && isTopLevel.value && selectedTopBlock.value && moveNeighbor('down'))
 const uploading = computed(() => uploads.value.some(u => u.status === 'uploading'))
 const uploadingCount = computed(() => uploads.value.filter(u => u.status !== 'done').length)
 
@@ -121,10 +132,49 @@ function toggleLink() {
   if (!view) return
   const { state } = view
   if (state.selection.empty) return
-  const href = window.prompt('链接地址（https://）')
-  if (!href) return
-  view.dispatch(state.tr.addMark(state.selection.from, state.selection.to, S.marks.link.create({ href, title: '' })))
+  emit('request-link')
+}
+
+function moveNeighbor(dir: 'up' | 'down'): boolean {
+  if (!view || !selectedTopBlock.value) return false
+  const ids = topLevelBlockIds(view.state.doc.toJSON() as Record<string, unknown>)
+  const i = ids.indexOf(selectedTopBlock.value)
+  if (i < 0) return false
+  if (dir === 'up') return i > 0
+  return i < ids.length - 1
+}
+
+function emitMove(direction: 'up' | 'down') {
+  if (!selectedTopBlock.value || !isTopLevel.value) return
+  emit('request-move', { blockId: selectedTopBlock.value, direction })
+}
+
+function refreshSelectionMeta() {
+  if (!view) return
+  const { from } = view.state.selection
+  const idx = blockIndex(view.state.doc)
+  let found: string | null = null
+  let top = false
+  for (const ref of idx.values()) {
+    if (from >= ref.pos && from <= ref.pos + ref.node.nodeSize) {
+      found = ref.blockId
+      top = view.state.doc.resolve(ref.pos).depth === 1
+      break
+    }
+  }
+  selectedTopBlock.value = found
+  isTopLevel.value = top
+  emit('selection-block', found, top)
+}
+
+function scrollToBlockId(blockId: string) {
+  if (!view) return
+  const ref = blockIndex(view.state.doc).get(blockId)
+  if (!ref) return
+  const sel = TextSelection.create(view.state.doc, Math.min(ref.pos + 1, view.state.doc.content.size - 1))
+  view.dispatch(view.state.tr.setSelection(sel).scrollIntoView())
   view.focus()
+  refreshSelectionMeta()
 }
 
 // ── 选区批注：文字选区→textRange fragments（跨区块逐片段）；块级选区/光标所在块→block；图片节点→image ──
@@ -273,6 +323,7 @@ onMounted(() => {
         const n = newState.doc.nodeAt(imageSel.value.pos)
         if (!n || n.type.name !== 'image' || n.attrs.blockId !== imageSel.value.blockId) imageSel.value = null
       }
+      if (tr.selectionSet) refreshSelectionMeta()
       if (tr.docChanged) {
         // 收集全部实际 step：原始 tr.steps + appendTransaction 补的 blockId 修正
         for (const step of tr.steps) pendingSteps.push(step.toJSON() as Record<string, unknown>)
@@ -286,7 +337,16 @@ onMounted(() => {
       }
     },
   })
+  refreshSelectionMeta()
 })
+
+function applyLinkHref(href: string) {
+  if (!view) return
+  const { state } = view
+  if (state.selection.empty) return
+  view.dispatch(state.tr.addMark(state.selection.from, state.selection.to, S.marks.link.create({ href, title: '' })))
+  view.focus()
+}
 
 // 远端正文替换：suspendRefresh（未保存/IME）时不重建
 watch(() => props.content, content => {
@@ -317,7 +377,14 @@ function flushNow() {
 }
 watch(uploadingCount, n => outlineStore.setUploadsPending(n), { immediate: true })
 
-defineExpose({ flushNow, pendingUploads: uploadingCount })
+defineExpose({
+  flushNow,
+  pendingUploads: uploadingCount,
+  scrollToBlockId,
+  applyLinkHref,
+  get selectedBlockId() { return selectedTopBlock.value },
+  get isTopLevelSelection() { return isTopLevel.value },
+})
 </script>
 
 <style lang="scss">
