@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -76,7 +77,7 @@ describe.skipIf(!E2E)('e2e 导出（需要无头 Chromium + 可达前端）', ()
             width: 120,
             height: 120,
             rotate: 0,
-            src: PNG_DATA_URL,
+            src: `data:image/png;base64,${logo.toString('base64')}`,
             fixedRatio: true,
           },
           {
@@ -131,6 +132,11 @@ describe.skipIf(!E2E)('e2e 导出（需要无头 Chromium + 可达前端）', ()
     writeFileSync(join(outDir, 'export-zh-chart.pptx'), pptxBuf)
     expect(pptxBuf.subarray(0, 2).toString()).toBe('PK')
     expect(pptxBuf.length).toBeGreaterThan(10_000)
+    const slideXml = execFileSync('unzip', ['-p', pptxPath, 'ppt/slides/slide1.xml']).toString('utf8')
+    expect(slideXml).toContain('中文标题与段落')
+    const listing = execFileSync('unzip', ['-Z1', pptxPath]).toString('utf8')
+    expect(listing).toMatch(/ppt\/charts\//)
+    expect(listing).toMatch(/ppt\/media\//)
     writeFileSync(join(outDir, 'export-zh-chart-meta.json'), JSON.stringify({
       docId: richDoc.docId,
       pdfBytes: pdfBuf.length,

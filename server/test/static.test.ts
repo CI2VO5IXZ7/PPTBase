@@ -11,9 +11,11 @@ let ctx: TestContext
 let staticDir = ''
 
 beforeAll(async () => {
-  staticDir = mkdtempSync(join(tmpdir(), 'pptist-static-'))
-  writeFileSync(join(staticDir, '..', 'outside-leak.txt'), 'SECRET_OUTSIDE_STATIC_ROOT')
-  mkdirSync(join(staticDir, 'static'))
+  const sandbox = mkdtempSync(join(tmpdir(), 'pptist-static-'))
+  staticDir = join(sandbox, 'web')
+  mkdirSync(join(staticDir, 'static'), { recursive: true })
+  writeFileSync(join(sandbox, 'outside-leak.txt'), 'SECRET_OUTSIDE_STATIC_ROOT')
+  writeFileSync(join(staticDir, 'outside-leak.txt'), 'INSIDE_STATIC_ROOT')
   writeFileSync(join(staticDir, 'index.html'), '<!doctype html><html><body>pptist-index</body></html>')
   writeFileSync(join(staticDir, 'admin.html'), '<!doctype html><html><body>pptist-admin <script src="./static/admin-x.js"></script></body></html>')
   writeFileSync(join(staticDir, 'static', 'index-abc123.js'), 'console.log("bundle")')
@@ -24,8 +26,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await ctx.app.close()
   try {
-    rmSync(join(staticDir, '..', 'outside-leak.txt'), { force: true })
-    rmSync(staticDir, { recursive: true, force: true })
+    rmSync(join(staticDir, '..'), { recursive: true, force: true })
   }
   catch { /* ignore */ }
 })
@@ -118,24 +119,41 @@ describe('静态前端托管', () => {
     expect(res.headers['content-type']).toContain('application/json')
   })
 
-  it('路径穿越：明文 .. 不得读出 static root 外文件', async () => {
-    const res = await ctx.app.inject({ method: 'GET', url: '/static/../outside-leak.txt' })
-    expect(res.body).not.toBe('SECRET_OUTSIDE_STATIC_ROOT')
-    expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
+  it('缺失的 /static 资源返回 JSON 404，不回退 index.html', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '/static/missing.js' })
+    expect(res.statusCode).toBe(404)
+    expect(res.json()).toMatchObject({ error: 'not_found' })
+    expect(res.body).not.toContain('pptist-index')
   })
 
-  it('路径穿越：编码 %2E%2E / %2e%2e 不得读出 static root 外文件', async () => {
-    for (const enc of ['/static/%2E%2E/outside-leak.txt', '/static/%2e%2e/outside-leak.txt']) {
-      const res = await ctx.app.inject({ method: 'GET', url: enc })
-      expect(res.body).not.toBe('SECRET_OUTSIDE_STATIC_ROOT')
+  it('路径穿越：HTTP 栈归一化后不得读出 static root 父目录金丝雀', async () => {
+    // 父目录金丝雀与 static root 内同名文件不同。Fastify 在进入 static/notFound 前
+    // 会把 .. 与 %2e%2e 折叠成站内路径，因此这些 URL 到不了父目录文件。
+    for (const url of [
+      '/../outside-leak.txt',
+      '/%2e%2e/outside-leak.txt',
+      '/static/../../outside-leak.txt',
+      '/static/%2e%2e/%2e%2e/outside-leak.txt',
+    ]) {
+      const res = await ctx.app.inject({ method: 'GET', url })
       expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
-      if (res.statusCode === 200) {
-        expect(res.body).not.toBe('console.log("bundle")')
+      if (res.body.includes('INSIDE_STATIC_ROOT')) {
+        expect(res.statusCode).toBe(200)
       }
       else {
-        expect([403, 404]).toContain(res.statusCode)
+        expect(res.body).toContain('pptist-index')
+        expect(res.statusCode).toBe(200)
       }
     }
+  })
+
+  it('编码路径 /%61dmin.html 仍是管理页并带安全头', async () => {
+    const res = await ctx.app.inject({ method: 'GET', url: '/%61dmin.html' })
+    expect(res.statusCode).toBe(200)
+    expect(res.body).toContain('pptist-admin')
+    expect(res.headers['content-security-policy']).toContain("default-src 'self'")
+    expect(res.headers['x-frame-options']).toBe('DENY')
+    expect(res.headers['cache-control']).toBe('no-store')
   })
 
   it('非规范斜杠：//static/... 不得因双斜杠越权读盘', async () => {

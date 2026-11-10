@@ -70,9 +70,11 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
     keyGenerator: rateLimitKey,
   })
 
-  // 管理台相关响应不缓存；admin 页面再叠加 CSP/禁 frame 等安全头
+  // 管理台相关响应不缓存；admin 页面再叠加 CSP/禁 frame 等安全头。
+  // 用解码后的路径判断：@fastify/static 会解码 %61 等并返回 admin.html，
+  // 若只比 req.raw.url，/%61dmin.html 会漏掉 CSP / X-Frame-Options。
   app.addHook('onSend', (req, reply, _payload, done) => {
-    const path = (req.raw.url ?? '').split('?')[0]
+    const path = normalizeRequestPath(req.raw.url)
     const isAdminApi = path.startsWith('/api/admin/')
     const isAdminPage = path === '/admin' || path === '/admin/' || path === '/admin.html'
     if (!isAdminApi && !isAdminPage) {
@@ -108,11 +110,12 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
     // SPA fallback：GET 且不属于 API / MCP / 资产 / 导出路径时回退 index.html；
     // 这些保留路径走不到这里时（无匹配路由）仍返回 JSON 404
     app.setNotFoundHandler((req, reply) => {
-      const path = (req.raw.url ?? '/').split('?')[0]
+      const path = normalizeRequestPath(req.raw.url)
       const reserved = path === '/api' || path.startsWith('/api/')
         || path === '/mcp' || path.startsWith('/mcp/')
         || path.startsWith('/assets/') || path.startsWith('/exports/')
-      if (req.method === 'GET' && !reserved) {
+        || path === '/static' || path.startsWith('/static/')
+      if (req.method === 'GET' && !reserved && !path.split('/').includes('..')) {
         // 管理台独立入口页（vite 多页构建产物 admin.html）；产物缺失时回退主页面
         if (hasAdminPage) {
           // /admin/ 归一化到 /admin：相对资源 ./static/… 在 /admin/ 下会错指到 /admin/static/…
@@ -130,4 +133,18 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
   }
 
   return app
+}
+
+/** 查询串剥离 + 百分号解码。解码失败时保留原路径。 */
+export function normalizeRequestPath(rawUrl: string | undefined): string {
+  const raw = (rawUrl ?? '/').split('?')[0] || '/'
+  let path = raw
+  try {
+    path = decodeURIComponent(raw)
+  }
+  catch {
+    path = raw
+  }
+  if (!path.startsWith('/')) path = `/${path}`
+  return path
 }
