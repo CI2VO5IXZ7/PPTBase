@@ -1025,3 +1025,201 @@ test('peekRemoteVersion 只返回远端版本，不改本地版本、不应用�
   assert.equal(failing.status, 'saved')
   assert.equal(failing.version, 1)
 })
+
+// 移动前已 drain：正文 409 没有待提交 steps。随后的普通 pull 不得把冲突刷成已保存。
+test('无待提交 steps 时 noteExternalConflict 之后的 pull 不得退出 conflict 或应用远端', async () => {
+  const applied: OutlineStateSnapshot[] = []
+  const statuses: string[] = []
+  const conflicts: { remoteVersion: number, remoteContentVersion: number, localSteps: StepJson[] }[] = []
+  const { transport } = fakeTransport(() => Promise.resolve(okWrite(2, 2)))
+  const core = new OutlineSyncCore(transport, {
+    onRemoteState: s => applied.push(s),
+    onStatus: s => statuses.push(s),
+    onConflict: i => conflicts.push(i),
+  }, rid)
+  core.version = 3
+  core.contentVersion = 2
+  const doc = { type: 'doc', text: 'local' }
+  core.trackDoc(doc)
+  core.noteExternalConflict({ remoteVersion: 9, remoteContentVersion: 4, message: 'move conflict' })
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.localDraft, null)
+  assert.equal(conflicts.length, 1)
+
+  // 正文版本未前进：旧逻辑会走 applyRemote，把 version 推进并 onRemoteState
+  transport.setRemote({ version: 8, contentVersion: 2, content: { type: 'doc', meta: true }, threads: [], status: null })
+  assert.equal(await core.pull(true), 'stale')
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+  assert.equal(applied.length, 0)
+  assert.equal(conflicts.length, 1, '正文版本未变时不重发冲突，也不得应用远端')
+  assert.equal(core.localDraft, null)
+
+  // 更高正文快照：只抬冲突水位，不改 status、不推进本地版本、不把正文应用到编辑器
+  transport.setRemote({ version: 10, contentVersion: 6, content: { type: 'doc', remote: true }, threads: [], status: null })
+  assert.equal(await core.pull(true), 'stale')
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+  assert.equal(applied.length, 0)
+  assert.equal(core.localDraft, null)
+  assert.equal(doc.text, 'local')
+  assert.ok(!statuses.includes('saved'))
+  assert.ok(!statuses.includes('dirty'))
+  assert.ok(!statuses.includes('saving'))
+  assert.equal(conflicts.length, 2)
+  assert.equal(conflicts[1].remoteVersion, 10)
+  assert.equal(conflicts[1].remoteContentVersion, 6)
+  assert.deepEqual(conflicts[1].localSteps, [])
+
+  // 更慢的外部报告不得回滚已由 pull 抬高的水位
+  core.noteExternalConflict({ remoteVersion: 9, remoteContentVersion: 5, message: 'stale move' })
+  assert.equal(conflicts.length, 2)
+  assert.equal(conflicts[1].remoteVersion, 10)
+  assert.equal(core.status, 'conflict')
+
+  // 等于水位的再拉：不重发、不应用
+  assert.equal(await core.pull(true), 'stale')
+  assert.equal(conflicts.length, 2)
+  assert.equal(applied.length, 0)
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+  assert.equal(core.status, 'conflict')
+
+  // 已丢弃草稿：更高 pull 不复活、不重发，冲突态保持
+  core.dropDraft()
+  transport.setRemote({ version: 12, contentVersion: 7, content: { type: 'doc', remote: true }, threads: [], status: null })
+  assert.equal(await core.pull(true), 'stale')
+  assert.equal(core.localDraft, null)
+  assert.equal(conflicts.length, 2)
+  assert.equal(applied.length, 0)
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+  assert.equal(await core.flush(), false)
+  assert.equal(core.status, 'conflict')
+})
+
+test('pull 的 getState 在途时 noteExternalConflict：迟到结果因纪元丢弃', async () => {
+  const resolvers: ((s: OutlineStateSnapshot) => void)[] = []
+  const applied: OutlineStateSnapshot[] = []
+  const statuses: string[] = []
+  const transport = {
+    getState: () => new Promise<OutlineStateSnapshot>(r => resolvers.push(r)),
+    patchSteps: () => Promise.resolve(okWrite(2, 2)),
+  }
+  const core = new OutlineSyncCore(transport, {
+    onRemoteState: s => applied.push(s),
+    onStatus: s => statuses.push(s),
+  }, rid)
+  core.version = 3
+  core.contentVersion = 2
+  core.trackDoc({ type: 'doc', text: 'local' })
+  const inflight = core.pull(true)
+  core.noteExternalConflict({ remoteVersion: 9, remoteContentVersion: 4, message: 'move conflict' })
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+  // 比本地版本更新的快照：若纪元守卫缺失，会走无 steps 的 applyRemote
+  resolvers[0]({ version: 10, contentVersion: 6, content: { type: 'doc', remote: true }, threads: [], status: null })
+  assert.equal(await inflight, 'stale')
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+  assert.equal(applied.length, 0)
+  assert.equal(core.localDraft, null)
+  assert.ok(!statuses.includes('saved'))
+  assert.ok(!statuses.includes('dirty'))
+  assert.ok(!statuses.includes('saving'))
+
+  // 冲突之后的后续普通补拉同样不得应用远端或改成已保存
+  const follow = core.pull(true)
+  resolvers[1]({ version: 11, contentVersion: 7, content: { type: 'doc', remote: true }, threads: [], status: null })
+  assert.equal(await follow, 'stale')
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+  assert.equal(applied.length, 0)
+  assert.ok(!statuses.includes('saved'))
+
+  const resolving = core.resolveConflict()
+  resolvers[2]({ version: 12, contentVersion: 8, content: { type: 'doc', remote: true }, threads: [], status: null })
+  const state = await resolving
+  assert.ok(state)
+  assert.equal(state.version, 12)
+  assert.equal(state.contentVersion, 8)
+  assert.equal(core.status, 'saved')
+  assert.equal(core.version, 12)
+  assert.equal(core.contentVersion, 8)
+  assert.equal(applied.length, 1)
+  assert.equal(applied[0].version, 12)
+})
+
+test('冲突守卫之后 resolveConflict 仍应用远端并回到 saved', async () => {
+  const applied: OutlineStateSnapshot[] = []
+  const { transport } = fakeTransport(() => Promise.resolve(okWrite(2, 2)))
+  transport.setRemote({ version: 10, contentVersion: 6, content: { type: 'doc', remote: true }, threads: [], status: null })
+  const core = new OutlineSyncCore(transport, { onRemoteState: s => applied.push(s) }, rid)
+  core.version = 3
+  core.contentVersion = 2
+  core.trackDoc({ type: 'doc', text: 'local' })
+  core.noteExternalConflict({ remoteVersion: 9, remoteContentVersion: 4, message: 'move conflict' })
+  assert.equal(await core.pull(true), 'stale')
+  assert.equal(core.status, 'conflict')
+  assert.equal(applied.length, 0)
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+
+  transport.setRemote({ version: 12, contentVersion: 8, content: { type: 'doc', resolved: true }, threads: [], status: null })
+  const state = await core.resolveConflict()
+  assert.ok(state)
+  assert.equal(state.version, 12)
+  assert.equal(state.contentVersion, 8)
+  assert.equal(core.status, 'saved')
+  assert.equal(core.version, 12)
+  assert.equal(core.contentVersion, 8)
+  assert.equal(core.localDraft, null)
+  assert.equal(applied.length, 1)
+  assert.equal(applied[0].version, 12)
+  assert.equal(applied[0].contentVersion, 8)
+
+  // 退出 conflict 后，普通 pull 可以再次应用远端
+  transport.setRemote({ version: 13, contentVersion: 9, content: { type: 'doc', later: true }, threads: [], status: null })
+  assert.equal(await core.pull(true), 'applied')
+  assert.equal(core.status, 'saved')
+  assert.equal(core.version, 13)
+  assert.equal(core.contentVersion, 9)
+  assert.equal(applied.length, 2)
+})
+
+test('pull 在途且仍有 steps 时 noteExternalConflict：迟到 pull 整体丢弃', async () => {
+  const resolvers: ((s: OutlineStateSnapshot) => void)[] = []
+  const applied: OutlineStateSnapshot[] = []
+  const conflicts: number[] = []
+  const transport = {
+    getState: () => new Promise<OutlineStateSnapshot>(r => resolvers.push(r)),
+    patchSteps: () => Promise.resolve(okWrite(2, 2)),
+  }
+  const core = new OutlineSyncCore(transport, {
+    onRemoteState: s => applied.push(s),
+    onConflict: i => conflicts.push(i.remoteVersion),
+  }, rid)
+  core.version = 3
+  core.contentVersion = 2
+  core.trackDoc({ type: 'doc', text: 'local' })
+  core.enqueue([{ a: 1 }])
+  const inflight = core.pull(true)
+  core.noteExternalConflict({ remoteVersion: 9, remoteContentVersion: 4, message: 'move conflict' })
+  assert.equal(conflicts.length, 1)
+  assert.deepEqual(core.localDraft!.steps, [{ a: 1 }])
+  resolvers[0]({ version: 10, contentVersion: 6, content: { type: 'doc', remote: true }, threads: [], status: null })
+  assert.equal(await inflight, 'stale')
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 3)
+  assert.equal(core.contentVersion, 2)
+  assert.equal(applied.length, 0)
+  assert.equal(conflicts.length, 1, '纪元失效的 pull 不得再上报冲突或应用远端')
+  assert.deepEqual(core.localDraft!.steps, [{ a: 1 }])
+  assert.equal(core.queue.size, 1)
+})

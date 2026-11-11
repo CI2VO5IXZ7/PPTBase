@@ -22,6 +22,10 @@
 //    /composing；drain 全程校验纪元，期间发生 resolve 即返回 false——队空是清出来的不是发完的；
 //    重叠的 resolveConflict 同理：自身 GET 返回时纪元已被更新调用抬高即整体丢弃返回 null，
 //    后到旧快照不得回滚新 resolve 已应用的版本/远端状态、不得重复移交草稿；
+//  - pull 在 getState 前后比对 resetEpoch：noteExternalConflict / resolveConflict 抬纪元后，
+//    迟到结果整体丢弃并返回 stale（不推进版本、不改 status、不触发 onRemoteState / onStatus('saved')）；
+//  - 已是 conflict 且没有未提交内容时，普通 pull 不得应用远端正文，也不得把 status 改成
+//    saved/dirty/saving。水位仍按单调规则更新。只有 resolveConflict 能退出 conflict 并应用远端；
 //  - drain 失败退避按剩余时限截断，不超 maxWaitMs 预算空等。
 //  - 外部 ops（moveBlock）的正文 409 经 noteExternalConflict 进入 conflict：不重放该 op、
 //    不改 currentDoc / 版本、不覆盖未保存正文；有未提交队列或缓冲时并入 localDraft，
@@ -110,7 +114,8 @@ export class OutlineSyncCore {
   private conflictRemoteContentVersion = 0
   // 用户显式丢弃草稿后置位：resolveConflict 不得从队列复活草稿；新冲突入口复位
   private draftDropped = false
-  // resolveConflict 纪元：每次调用 +1，使在途 flush/重叠 resolve 的迟到结果整体失效
+  // noteExternalConflict / resolveConflict 纪元：每次 +1。在途 flush、重叠 resolve、
+  // 以及已发出的 pull 在纪元不符时整体丢弃，不得回滚版本或把冲突刷成已保存
   private resetEpoch = 0
   // 输入中/IME 期间收到的远端更新挂起
   remotePullPending = false
@@ -309,8 +314,13 @@ export class OutlineSyncCore {
 
   // 独立 GET 补拉（初始化、SSE 重连、延迟安全时机）。有未提交内容只更新元数据版本，
   // 不覆盖本地正文；无未提交内容才允许外层应用全量状态。
+  // 已处于 conflict 时，无未提交内容的普通 pull 不得应用远端——只有 resolveConflict 能退出。
   async pull(applyRemote: boolean): Promise<'applied' | 'deferred' | 'meta-only' | 'stale'> {
+    // getState 前记下纪元：等待期间 noteExternalConflict / resolveConflict 会 +1
+    const epoch = this.resetEpoch
     const state = await this.transport.getState()
+    // 纪元已失效则整体丢弃：不推进版本、不改 status、不触发 onRemoteState / onStatus('saved')
+    if (epoch !== this.resetEpoch) return 'stale'
     // 单调守卫：并发 pull 中更慢的旧响应不得回滚已推进的版本（含 PATCH 提交推进的）；
     // 不更新版本、不触发 onRemoteState，元数据分支同样适用
     if (state.version < this.version || state.contentVersion < this.contentVersion) return 'stale'
@@ -348,6 +358,25 @@ export class OutlineSyncCore {
       this.remotePullPending = true
       this.events.onRemoteState?.(state)
       return 'deferred'
+    }
+    // 移动前已 drain 的正文 409 通常没有待提交 steps。此时不得走「应用远端」：
+    // onRemoteState 会让外层把界面刷成已保存，但 status 仍是 conflict，flush 会一直拒绝。
+    // 水位按冲突分支的单调规则前进（可 onConflict）；不改 status、不覆盖正文、不造空草稿。
+    if (this.status === 'conflict') {
+      const newerThanWatermark = state.version > this.conflictRemoteVersion
+        || state.contentVersion > this.conflictRemoteContentVersion
+      if (state.contentVersion > this.contentVersion && newerThanWatermark) {
+        this.conflictRemoteVersion = state.version
+        this.conflictRemoteContentVersion = state.contentVersion
+        if (!this.draftDropped) {
+          this.events.onConflict?.({
+            remoteVersion: this.conflictRemoteVersion,
+            remoteContentVersion: this.conflictRemoteContentVersion,
+            localSteps: this.localDraft?.steps ?? [],
+          })
+        }
+      }
+      return 'stale'
     }
     if (applyRemote) {
       this.version = state.version
