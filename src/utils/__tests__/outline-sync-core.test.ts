@@ -897,3 +897,131 @@ test('单次 resolveConflict：返回应用快照，版本推进，远端应用�
   assert.deepEqual(handed[0].content, { v: 1 })
   assert.deepEqual(handed[0].steps, [{ a: 1 }])
 })
+
+// 32. 外部 ops 409：进入 conflict，不重放、不覆盖本地正文；迟到的成功 flush 不得改回已保存
+test('noteExternalConflict：保留本地正文与未提交 steps，不重放，迟到成功不得显示已保存', async () => {
+  let resolvePatch: ((r: WriteResult) => void) | null = null
+  const { transport, calls } = fakeTransport(() => new Promise<WriteResult>(r => { resolvePatch = r }))
+  const conflicts: { remoteVersion: number, remoteContentVersion: number, localSteps: StepJson[] }[] = []
+  const core = new OutlineSyncCore(transport, { onConflict: i => conflicts.push(i) }, rid)
+  core.version = 1
+  core.contentVersion = 1
+  const doc = { type: 'doc', text: 'local' }
+  core.trackDoc(doc)
+  core.enqueue([{ a: 1 }])
+  const flushing = core.flush()
+  assert.equal(calls.length, 1)
+  core.noteExternalConflict({ remoteVersion: 9, remoteContentVersion: 4, message: 'move conflict' })
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 1)
+  assert.equal(core.contentVersion, 1)
+  assert.equal(core.localDraft!.content, doc)
+  assert.deepEqual(core.localDraft!.steps, [{ a: 1 }])
+  assert.equal(conflicts.length, 1)
+  assert.equal(conflicts[0].remoteVersion, 9)
+  assert.equal(conflicts[0].remoteContentVersion, 4)
+  assert.deepEqual(conflicts[0].localSteps, [{ a: 1 }])
+  resolvePatch!(okWrite(2, 2))
+  assert.equal(await flushing, false)
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.version, 1)
+  assert.equal(core.contentVersion, 1)
+  assert.equal(calls.length, 1, '失败的外部 op 不得自动重放')
+  assert.equal(core.localDraft!.content, doc)
+})
+
+test('noteExternalConflict：没有未保存正文时不制造草稿；缺版本对仍不得显示已保存', async () => {
+  const { transport, calls } = fakeTransport(() => Promise.resolve(okWrite(2, 2)))
+  const conflicts: unknown[] = []
+  const core = new OutlineSyncCore(transport, { onConflict: i => conflicts.push(i) }, rid)
+  core.version = 3
+  core.contentVersion = 2
+  const doc = { type: 'doc', text: 'saved' }
+  core.trackDoc(doc)
+  core.noteExternalConflict({ remoteVersion: 8, remoteContentVersion: 5, message: 'move conflict' })
+  assert.equal(core.status, 'conflict')
+  assert.equal(core.localDraft, null)
+  assert.equal(conflicts.length, 1)
+  assert.equal(core.version, 3)
+  assert.equal(calls.length, 0)
+  assert.equal(doc.text, 'saved')
+
+  const bare = new OutlineSyncCore(transport, { onConflict: i => conflicts.push(i) }, rid)
+  bare.version = 3
+  bare.contentVersion = 2
+  bare.trackDoc(doc)
+  bare.noteExternalConflict({ remoteVersion: null, remoteContentVersion: null, message: 'no versions' })
+  assert.equal(bare.status, 'conflict')
+  assert.notEqual(bare.status, 'saved')
+  assert.equal(bare.localDraft, null)
+  assert.equal(conflicts.length, 1, '没有成对远端版本时不上报空的 conflictRemote')
+  assert.equal(bare.version, 3)
+})
+
+test('noteExternalConflict：更慢的旧报告不回滚水位；dropDraft 后不复活草稿', async () => {
+  const { transport } = fakeTransport(() => Promise.resolve(okWrite(9, 7)))
+  transport.setRemote({ version: 5, contentVersion: 3, content: { type: 'doc' }, threads: [], status: null })
+  const conflicts: { remoteVersion: number, remoteContentVersion: number }[] = []
+  const handed: unknown[] = []
+  const core = new OutlineSyncCore(transport, {
+    onConflict: i => conflicts.push(i),
+    onDraft: d => handed.push(d),
+  }, rid)
+  core.version = 1
+  core.contentVersion = 1
+  core.trackDoc({ v: 1 })
+  core.enqueue([{ a: 1 }])
+  assert.equal(await core.pull(true), 'deferred')
+  assert.equal(conflicts.length, 1)
+  assert.equal(conflicts[0].remoteVersion, 5)
+  core.noteExternalConflict({ remoteVersion: 4, remoteContentVersion: 2, message: 'stale move' })
+  assert.equal(conflicts.length, 1)
+  assert.equal(conflicts[0].remoteVersion, 5)
+  assert.equal(conflicts[0].remoteContentVersion, 3)
+  core.noteExternalConflict({ remoteVersion: 8, remoteContentVersion: 6, message: 'newer move' })
+  assert.equal(conflicts.length, 2)
+  assert.equal(conflicts[1].remoteVersion, 8)
+  assert.equal(conflicts[1].remoteContentVersion, 6)
+  assert.deepEqual(core.localDraft!.steps, [{ a: 1 }])
+
+  core.dropDraft()
+  assert.equal(core.localDraft, null)
+  core.noteExternalConflict({ remoteVersion: 10, remoteContentVersion: 7, message: 'after drop' })
+  assert.equal(core.localDraft, null)
+  assert.equal(core.snapshotPendingDraft(), null)
+  assert.equal(conflicts.length, 2, '已丢弃草稿后不得借外部 409 重发冲突或复活草稿')
+  core.trackDoc({ v: 2 })
+  core.enqueue([{ a: 2 }])
+  transport.setRemote({ version: 11, contentVersion: 8, content: { type: 'doc', remote: true }, threads: [], status: null })
+  await core.resolveConflict()
+  assert.equal(handed.length, 0)
+  assert.equal(core.localDraft, null)
+  assert.equal(core.status, 'saved')
+})
+
+test('peekRemoteVersion 只返回远端版本，不改本地版本、不应用正文', async () => {
+  const applied: OutlineStateSnapshot[] = []
+  const { transport } = fakeTransport(() => Promise.resolve(okWrite(2, 2)), () => ({
+    version: 6, contentVersion: 2, content: { type: 'doc', remote: true }, threads: [], status: null,
+  }))
+  const core = new OutlineSyncCore(transport, { onRemoteState: s => applied.push(s) }, rid)
+  core.version = 1
+  core.contentVersion = 1
+  core.trackDoc({ v: 1 })
+  assert.deepEqual(await core.peekRemoteVersion(), { version: 6, contentVersion: 2 })
+  assert.equal(core.version, 1)
+  assert.equal(core.contentVersion, 1)
+  assert.equal(core.status, 'saved')
+  assert.equal(applied.length, 0)
+  assert.deepEqual(core.localDraft, null)
+
+  const failing = new OutlineSyncCore({
+    getState: () => Promise.reject(new Error('net')),
+    patchSteps: () => Promise.resolve(okWrite(2, 2)),
+  }, {}, rid)
+  failing.version = 1
+  failing.contentVersion = 1
+  assert.equal(await failing.peekRemoteVersion(), null)
+  assert.equal(failing.status, 'saved')
+  assert.equal(failing.version, 1)
+})

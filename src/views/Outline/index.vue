@@ -63,12 +63,14 @@
         class="nav-col"
         :content="editorContent"
         :active-block-id="activeBlockId"
+        :escape-closes="isNarrow && navOpen"
         @navigate="onNavBlock"
+        @close="navOpen = false"
       />
       <OutlineEditor
         ref="editorRef"
         class="editor-col"
-        :readonly="outline.readonly || resolving"
+        :readonly="editorReadonly"
         :threads="outline.threads"
         :content="editorContent"
         :suspend-refresh="suspendRefresh"
@@ -128,7 +130,7 @@ import { useOutlineStore } from '@/store/outline'
 import useOutlineSync from '@/hooks/useOutlineSync'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
 import { outlineActionBlocked } from '@/utils/outline/submitGate'
-import { commentRevisionCurrent, cloneDraftBody, CONFLICT_REBACKUP_MESSAGE, conflictRefreshAllowed, conflictRefreshDecision, navigationNeedsLeave, noteLocalConflictEdit, reviewedVersionCurrent, sameDraftBody, textsEqual } from '@/utils/outline/editorGuards'
+import { commentRevisionCurrent, cloneDraftBody, CONFLICT_REBACKUP_MESSAGE, conflictInputLocked, conflictRefreshAllowed, conflictRefreshDecision, navigationNeedsLeave, noteLocalConflictEdit, reviewedVersionCurrent, sameDraftBody, textsEqual } from '@/utils/outline/editorGuards'
 import type { DraftBody } from '@/utils/outline/editorGuards'
 import { moveBlockedByPendingUploads } from '@/utils/outline/imageInsert'
 import { revokePendingBlobs, scheduleBlobRevoke, type BlobRevokeTimer } from '@/utils/outline/blobRevoke'
@@ -190,6 +192,8 @@ const canAct = computed(() => !outlineActionBlocked({
   busy: busy.value, readonly: outline.readonly,
   uploadsPending: outline.uploadsPending, saveStatus: outline.saveStatus,
 }))
+// 冲突且草稿已丢弃：只读直到 resolveConflict 把状态拉回。仍有草稿时不锁，续编保持原样。
+const editorReadonly = computed(() => outline.readonly || resolving.value || conflictInputLocked(outline.saveStatus, !!outline.localDraft))
 
 const saveText = computed(() => ({
   saved: '已保存', saving: '保存中…', dirty: '未保存', offline: '保存失败', conflict: '版本冲突',
@@ -238,27 +242,37 @@ const onSteps = (steps: Record<string, unknown>[]) => {
   sync.enqueueSteps(steps)
 }
 
-const postOps = async (op: Record<string, unknown>) => {
-  if (outline.readonly) return
-  editorRef.value?.flushNow()
-  await Promise.resolve()
-  if (!(await sync.drain())) {
-    outline.lastError = '请先解决未保存/冲突内容'
-    return
-  }
+type OpsSendResult = { ok: true } | { ok: false, err: unknown | null }
+
+// 只用调用方传入的 baseVersion。这里不再 flush、drain，也不读 outline.version。
+const postOpsAtVersion = async (op: Record<string, unknown>, baseVersion: number): Promise<OpsSendResult> => {
+  if (outline.readonly) return { ok: false, err: null }
   busy.value = true
   try {
-    const res = await postOutlineOps(documentStore.docId, outline.version, nanoid(16), [op])
+    const res = await postOutlineOps(documentStore.docId, baseVersion, nanoid(16), [op])
     outline.setVersions(res.version, res.contentVersion)
     await sync.refresh()
+    return { ok: true }
   }
   catch (err) {
     const e = err as { message?: string }
     outline.lastError = e.message ?? '操作失败'
+    return { ok: false, err }
   }
   finally {
     busy.value = false
   }
+}
+
+const postOps = async (op: Record<string, unknown>): Promise<OpsSendResult> => {
+  if (outline.readonly) return { ok: false, err: null }
+  editorRef.value?.flushNow()
+  await Promise.resolve()
+  if (!(await sync.drain())) {
+    outline.lastError = '请先解决未保存/冲突内容'
+    return { ok: false, err: null }
+  }
+  return postOpsAtVersion(op, outline.version)
 }
 
 const onThreadOp = (op: Record<string, unknown>) => void postOps(op)
@@ -285,7 +299,9 @@ const onMoveBlock = async ({ blockId, direction }: { blockId: string, direction:
   moving.value = true
   editorRef.value?.setMoveLock(true)
   try {
-    await postOps(op)
+    const sent = await postOps(op)
+    // 正文 409 进入冲突横幅，不改用新版本重放这次移动。openThreads 确认 409 不是这条路径。
+    if (!sent.ok && sent.err) await sync.noteMoveConflict(sent.err)
   }
   finally {
     editorRef.value?.setMoveLock(false)
@@ -336,11 +352,13 @@ const onCommentModalSubmit = async (text: string) => {
       pendingCommentRev.value = null
       return
     }
+    // 校验已完成。立刻钉住这一刻的版本；后面不得再 drain 或读取实时 outline.version。
+    const baseVersion = outline.version
     commentModalOpen.value = false
     pendingCommentAnchor.value = null
     pendingCommentTexts.value = null
     pendingCommentRev.value = null
-    await postOps({ op: 'addComment', anchor, content: text })
+    await postOpsAtVersion({ op: 'addComment', anchor, content: text }, baseVersion)
   }
   finally {
     commentSubmitting.value = false

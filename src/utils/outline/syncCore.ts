@@ -23,6 +23,9 @@
 //    重叠的 resolveConflict 同理：自身 GET 返回时纪元已被更新调用抬高即整体丢弃返回 null，
 //    后到旧快照不得回滚新 resolve 已应用的版本/远端状态、不得重复移交草稿；
 //  - drain 失败退避按剩余时限截断，不超 maxWaitMs 预算空等。
+//  - 外部 ops（moveBlock）的正文 409 经 noteExternalConflict 进入 conflict：不重放该 op、
+//    不改 currentDoc / 版本、不覆盖未保存正文；有未提交队列或缓冲时并入 localDraft，
+//    已 drop 的草稿不复活。peekRemoteVersion 只读远端版本，不应用正文。
 
 import { StepsQueue } from './pendingSteps.ts'
 
@@ -398,6 +401,50 @@ export class OutlineSyncCore {
     this.setStatus('saved')
     this.events.onRemoteState?.(state)
     return state
+  }
+
+  // 块移动等外部 ops 的正文 409。不发送、不重放该 op，也不把远端正文写进 currentDoc。
+  // 版本对不齐时仍进入 conflict（不报 saved）。已丢弃的草稿不得借这次冲突复活。
+  noteExternalConflict(info: {
+    remoteVersion: number | null
+    remoteContentVersion: number | null
+    message?: string
+  }): void {
+    // 已经飞出去的 steps 回包不得把本次 conflict 盖成 saved，也不得顺势重放失败的 op。
+    this.resetEpoch++
+    const entering = this.status !== 'conflict'
+    const curV = info.remoteVersion
+    const curCV = info.remoteContentVersion
+    const comparable = curV != null && curCV != null
+    const staleReport = !entering
+      && comparable
+      && curV <= this.conflictRemoteVersion
+      && curCV <= this.conflictRemoteContentVersion
+    if (curV != null) this.conflictRemoteVersion = Math.max(this.conflictRemoteVersion, curV)
+    if (curCV != null) this.conflictRemoteContentVersion = Math.max(this.conflictRemoteContentVersion, curCV)
+    if (entering) this.draftDropped = false
+    const unsaved = this.queue.size > 0 || this.buffered || this.localDraft != null
+    if (!this.draftDropped && unsaved && !this.localDraft) {
+      this.localDraft = { content: this.currentDoc, steps: [...this.queue.snapshotAll()] }
+    }
+    this.setStatus('conflict', info.message || '版本冲突')
+    if (staleReport || this.draftDropped || !comparable) return
+    this.events.onConflict?.({
+      remoteVersion: this.conflictRemoteVersion,
+      remoteContentVersion: this.conflictRemoteContentVersion,
+      localSteps: this.localDraft?.steps ?? [],
+    })
+  }
+
+  // 409 体没有 contentVersion 时补一对远端版本。不更新本地版本、不触发 onRemoteState。
+  async peekRemoteVersion(): Promise<{ version: number, contentVersion: number } | null> {
+    try {
+      const state = await this.transport.getState()
+      return { version: state.version, contentVersion: state.contentVersion }
+    }
+    catch {
+      return null
+    }
   }
 
   dropDraft() {

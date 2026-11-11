@@ -90,3 +90,55 @@ export function navigationNeedsLeave(drained: boolean, hasUnsaved: boolean, save
   if (!drained || hasUnsaved) return true
   return saveStatus === 'offline' || saveStatus === 'dirty' || saveStatus === 'conflict'
 }
+
+// 冲突且本地草稿已经不在（显式丢弃，或这次冲突没有形成草稿）：禁止再改正文。
+// 仍有草稿时返回 false，冲突期间续编和备份失效规则保持原样。
+export function conflictInputLocked(saveStatus: string, hasLocalDraft: boolean): boolean {
+  return saveStatus === 'conflict' && !hasLocalDraft
+}
+
+export interface OpsConflictHit {
+  remoteVersion: number | null
+  remoteContentVersion: number | null
+  message: string
+}
+
+// 正文 ops 的 CAS 409。确认大纲时的 openThreads 409 不是正文冲突，不得走这套恢复。
+export function outlineOpsContentConflict(err: unknown): OpsConflictHit | null {
+  if (!err || typeof err !== 'object') return null
+  const e = err as {
+    status?: number
+    message?: string
+    currentVersion?: number
+    currentContentVersion?: number
+    issues?: Record<string, unknown>
+  }
+  if (e.status !== 409) return null
+  const issues = e.issues
+  if (issues && issues.openThreads) return null
+  const fromIssues = (key: 'currentVersion' | 'currentContentVersion'): number | null => {
+    const value = issues?.[key]
+    return typeof value === 'number' ? value : null
+  }
+  const remoteVersion = fromIssues('currentVersion') ?? (typeof e.currentVersion === 'number' ? e.currentVersion : null)
+  const remoteContentVersion = fromIssues('currentContentVersion')
+    ?? (typeof e.currentContentVersion === 'number' ? e.currentContentVersion : null)
+  const message = typeof e.message === 'string' && e.message ? e.message : '版本冲突'
+  return { remoteVersion, remoteContentVersion, message }
+}
+
+// 409 体里已经有正文版本时，只用这一对，不再改读后来的拉取结果。
+// 缺少 contentVersion 时才采用同一次只读拉取的成对版本；拉不到也不要把状态当成已保存。
+export function resolveOpsConflictVersions(
+  reported: { remoteVersion: number | null, remoteContentVersion: number | null },
+  peeked: { version: number, contentVersion: number } | null,
+): { remoteVersion: number | null, remoteContentVersion: number | null } {
+  if (reported.remoteContentVersion != null) {
+    return { remoteVersion: reported.remoteVersion, remoteContentVersion: reported.remoteContentVersion }
+  }
+  if (!peeked) return { remoteVersion: reported.remoteVersion, remoteContentVersion: null }
+  if (reported.remoteVersion != null && peeked.version < reported.remoteVersion) {
+    return { remoteVersion: reported.remoteVersion, remoteContentVersion: null }
+  }
+  return { remoteVersion: peeked.version, remoteContentVersion: peeked.contentVersion }
+}

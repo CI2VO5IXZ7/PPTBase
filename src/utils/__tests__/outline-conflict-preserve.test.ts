@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import {
   cloneDraftBody,
   CONFLICT_REBACKUP_MESSAGE,
+  conflictInputLocked,
   conflictRefreshAllowed,
   conflictRefreshDecision,
   noteLocalConflictEdit,
@@ -106,4 +107,12 @@ test('选区或非冲突状态不清除备份；快照一致或草稿已不在�
   assert.equal(conflictRefreshAllowed(false, true), false)
   assert.equal(conflictRefreshAllowed(true, true), true)
   assert.equal(conflictRefreshAllowed(false, false), true)
+})
+
+test('冲突且草稿已不在时锁定正文；仍有草稿时不锁定', () => {
+  assert.equal(conflictInputLocked('conflict', false), true)
+  assert.equal(conflictInputLocked('conflict', true), false)
+  assert.equal(conflictInputLocked('saved', false), false)
+  assert.equal(conflictInputLocked('dirty', false), false)
+  assert.equal(conflictInputLocked('offline', true), false)
 })

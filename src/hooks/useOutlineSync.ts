@@ -6,6 +6,7 @@ import { useOutlineStore } from '@/store/outline'
 import { useDocumentStore } from '@/store/document'
 import { setDocToken, subscribe } from '@/services/document'
 import { getOutline, listOutlineFeedback, patchOutlineSteps } from '@/services/outline'
+import { outlineOpsContentConflict, resolveOpsConflictVersions } from '@/utils/outline/editorGuards'
 import { OutlineSyncCore, type OutlineStateSnapshot } from '@/utils/outline/syncCore'
 
 const FLUSH_DELAY = 1200
@@ -203,9 +204,31 @@ export default function useOutlineSync() {
   const hasUnsavedChanges = () => core.hasUnsaved
   const pendingCount = () => core.pendingCount
 
+  const publishExternalDraft = () => {
+    const draft = core.localDraft
+    if (draft?.content) outline.stashDraft(draft.content, draft.steps)
+  }
+
+  // moveBlock 的正文 409。不重放失败的 op。缺 contentVersion 时先进入 conflict，
+  // 再只读拉取版本补 conflictRemote；拉取不应用远端正文，失败也不回到已保存。
+  async function noteMoveConflict(err: unknown): Promise<boolean> {
+    const hit = outlineOpsContentConflict(err)
+    if (!hit) return false
+    const reported = resolveOpsConflictVersions(hit, null)
+    const apply = (versions: { remoteVersion: number | null, remoteContentVersion: number | null }) => {
+      core.noteExternalConflict({ ...versions, message: hit.message })
+      // 版本还不成对时 onConflict 不会把草稿写入 store。先放进去，避免拉取期间编辑器被误锁。
+      publishExternalDraft()
+    }
+    apply(reported)
+    if (reported.remoteContentVersion != null) return true
+    apply(resolveOpsConflictVersions(hit, await core.peekRemoteVersion()))
+    return true
+  }
+
   return {
     init, destroy, flush, drain, scheduleFlush, refresh, resolveConflict,
     enqueueSteps, hasUnsavedChanges, pendingCount, preservePending, setComposing, trackEditorDoc,
-    dropDraft,
+    dropDraft, noteMoveConflict,
   }
 }

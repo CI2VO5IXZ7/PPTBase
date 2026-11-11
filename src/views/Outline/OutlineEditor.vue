@@ -378,7 +378,8 @@ onMounted(() => {
     state,
     editable: () => !props.readonly && !moveLocked.value,
     dispatchTransaction(tr) {
-      if (moveLocked.value && tr.docChanged) return
+      // 只读（含冲突丢弃草稿后）在事务入口丢掉正文修改。选区事务仍放行。
+      if ((props.readonly || moveLocked.value) && tr.docChanged) return
       const newState = view!.state.apply(tr)
       view!.updateState(newState)
       canComment.value = true
