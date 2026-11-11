@@ -476,26 +476,52 @@ const copyDraft = async () => {
   }
 }
 
-const downloadDraft = () => {
+const downloadDraft = async () => {
   const payload = buildDraftPayload()
   if (!payload) return
   const text = JSON.stringify(payload, null, 2)
-  if (!text.includes('"content"')) return
+  if (!text.includes('"content"') || text.length < 10) return
+  const snapshot = JSON.parse(JSON.stringify({ content: payload.content, steps: payload.steps })) as { content: unknown, steps: unknown }
+  let url: string | undefined
+  let anchor: HTMLAnchorElement | undefined
   try {
     const blob = new Blob([text], { type: 'application/json' })
     if (blob.size < 10) return
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `outline-draft-${documentStore.docId}.json`
-    a.click()
-    URL.revokeObjectURL(url)
+    const written = await blob.text()
+    const parsed = JSON.parse(written) as { content: unknown, steps: unknown }
+    if (!written.includes('"content"') || !sameDraftBody(snapshot, { content: parsed.content, steps: parsed.steps })) {
+      throw new Error('download payload mismatch')
+    }
+    url = URL.createObjectURL(blob)
+    const probed = await (await fetch(url)).text()
+    const probedBody = JSON.parse(probed) as { content: unknown, steps: unknown }
+    if (probed !== written || !sameDraftBody(snapshot, { content: probedBody.content, steps: probedBody.steps })) {
+      throw new Error('download bytes mismatch')
+    }
+    anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `outline-draft-${documentStore.docId}.json`
+    anchor.rel = 'noopener'
+    anchor.style.display = 'none'
+    anchor.addEventListener('click', (event) => event.stopPropagation())
+    document.body.appendChild(anchor)
+    anchor.click()
+    const now = buildDraftPayload()
+    if (!sameDraftBody(snapshot, now ? { content: now.content, steps: now.steps } : null)) {
+      conflictDraftPreserved.value = false
+      outline.lastError = '草稿已变化，请重新下载后再刷新'
+      return
+    }
     conflictDraftPreserved.value = true
     outline.lastError = '草稿已下载'
   }
   catch {
     outline.lastError = '下载失败'
     conflictDraftPreserved.value = false
+  }
+  finally {
+    anchor?.remove()
+    if (url) URL.revokeObjectURL(url)
   }
 }
 

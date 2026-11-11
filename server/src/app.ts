@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify'
 import rateLimit from '@fastify/rate-limit'
@@ -71,8 +71,8 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
   })
 
   // 管理台相关响应不缓存；admin 页面再叠加 CSP/禁 frame 等安全头。
-  // 用解码后的路径判断：@fastify/static 会解码 %61 等并返回 admin.html，
-  // 若只比 req.raw.url，/%61dmin.html 会漏掉 CSP / X-Frame-Options。
+  // 先百分号解码，再折叠 . / ..。/./admin.html、/%2e/admin.html、/static/../admin.html
+  // 都会落到管理页；只比原始 URL 会漏掉 CSP / X-Frame-Options。
   app.addHook('onSend', (req, reply, _payload, done) => {
     const path = normalizeRequestPath(req.raw.url)
     const isAdminApi = path.startsWith('/api/admin/')
@@ -111,11 +111,14 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
     // 这些保留路径走不到这里时（无匹配路由）仍返回 JSON 404
     app.setNotFoundHandler((req, reply) => {
       const path = normalizeRequestPath(req.raw.url)
+      // 折叠后的路径不再含 `..`，但原始解码路径里的 `..` 仍要拒绝，避免回退把穿越请求当成站内页面。
+      const decoded = decodeRequestPath(req.raw.url)
+      const traverses = decoded.split('/').includes('..') || path.split('/').includes('..')
       const reserved = path === '/api' || path.startsWith('/api/')
         || path === '/mcp' || path.startsWith('/mcp/')
         || path.startsWith('/assets/') || path.startsWith('/exports/')
         || path === '/static' || path.startsWith('/static/')
-      if (req.method === 'GET' && !reserved && !path.split('/').includes('..')) {
+      if (req.method === 'GET' && !reserved && !traverses) {
         // 管理台独立入口页（vite 多页构建产物 admin.html）；产物缺失时回退主页面
         if (hasAdminPage) {
           // /admin/ 归一化到 /admin：相对资源 ./static/… 在 /admin/ 下会错指到 /admin/static/…
@@ -135,8 +138,7 @@ export async function buildApp(config: AppConfig, db?: Db, opts?: { logger?: boo
   return app
 }
 
-/** 查询串剥离 + 百分号解码。解码失败时保留原路径。 */
-export function normalizeRequestPath(rawUrl: string | undefined): string {
+function decodeRequestPath(rawUrl: string | undefined): string {
   const raw = (rawUrl ?? '/').split('?')[0] || '/'
   let path = raw
   try {
@@ -147,4 +149,13 @@ export function normalizeRequestPath(rawUrl: string | undefined): string {
   }
   if (!path.startsWith('/')) path = `/${path}`
   return path
+}
+
+/** 查询串剥离、百分号解码，再折叠 `.` / `..`。解码失败时保留原路径再折叠。
+ * 绝对路径上的 `..` 在根处夹住，结果仍在站点根内，不会指向静态目录的父路径。
+ */
+export function normalizeRequestPath(rawUrl: string | undefined): string {
+  const path = decodeRequestPath(rawUrl)
+  const normalized = posix.normalize(path)
+  return normalized.startsWith('/') ? normalized : `/${normalized}`
 }

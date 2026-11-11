@@ -37,6 +37,23 @@ const api = (request: APIRequestContext, baseUrl: string, headers: Record<string
 const bearer = (key: string) => ({ authorization: `Bearer ${key}` })
 const tok = (t: string) => ({ 'x-doc-token': t })
 
+// 默认大纲只有一个顶层段落。deleteBlocks 删光会 400。
+// 删除本地正在编辑的那一块之前，用已保存的 insertBlocks 再准备若干顶层段落。
+async function seedSpareBlocks(A: ReturnType<typeof api>, docId: string, extra: number) {
+  for (let i = 0; i < extra; i++) {
+    const cur = await (await A.get(`/api/docs/${docId}/outline`)).json()
+    const blockId = `keep${i}${Math.random().toString(36).slice(2, 8)}`
+    const res = await A.post(`/api/docs/${docId}/outline/ops`, {
+      baseVersion: cur.version,
+      ops: [{
+        op: 'insertBlocks',
+        blocks: [{ type: 'paragraph', attrs: { blockId }, content: [{ type: 'text', text: 'KEEP' }] }],
+      }],
+    })
+    expect(res.status()).toBe(200)
+  }
+}
+
 const editor = (page: Page) => page.locator('.outline-editor .ProseMirror')
 const thread = (page: Page) => page.locator('.comments-panel .thread')
 
@@ -581,6 +598,7 @@ test('11. 冲突：远端删本地正在编辑的块 → 确定性 409，草稿�
   const doc = await server.createDoc('conflict')
   const A = api(request, server.baseUrl, bearer(server.apiKey))
   await A.post(`/api/docs/${doc.docId}/outline`, {})
+  await seedSpareBlocks(A, doc.docId, 1)
   const p = await outlinePage(doc.docId)
   const ed = editor(p)
   // 延迟本地 PATCH，确保远端删块先落地（消除竞态）
@@ -601,12 +619,15 @@ test('11. 冲突：远端删本地正在编辑的块 → 确定性 409，草稿�
   await expect(p.locator('.save')).toContainText(/未保存|保存中/, { timeout: 5000 })
   // 远端删除本地正在输入的块 → 本地 insert step 无法重放 → 确定性 409
   const cur = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(cur.content.content.length).toBeGreaterThanOrEqual(2)
   const firstBlockId = cur.content.content[0].attrs.blockId
   const opsRes = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
     baseVersion: cur.version,
     ops: [{ op: 'deleteBlocks', blockIds: [firstBlockId] }],
   })
   expect(opsRes.status()).toBe(200)
+  const left = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(left.content.content.length).toBeGreaterThanOrEqual(1)
   // 确定性断言：冲突横幅 + 状态文本
   await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 10000 })
   await expect(p.locator('.save')).toContainText('冲突')
@@ -749,6 +770,7 @@ test('14. 丢弃归档草稿后继续编辑：断网离开时新编辑仍进草�
   const doc = await server.createDoc('dropdraft')
   const A = api(request, server.baseUrl, bearer(server.apiKey))
   await A.post(`/api/docs/${doc.docId}/outline`, {})
+  await seedSpareBlocks(A, doc.docId, 1)
   const p = await outlinePage(doc.docId)
   const ed = editor(p)
   // 延迟本地 PATCH，确保远端删块先落地 → 确定性 409（同例11）
@@ -764,12 +786,15 @@ test('14. 丢弃归档草稿后继续编辑：断网离开时新编辑仍进草�
   await p.keyboard.type('DROP-BEFORE-1')
   await expect(p.locator('.save')).toContainText(/未保存|保存中/, { timeout: 5000 })
   const cur = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(cur.content.content.length).toBeGreaterThanOrEqual(2)
   const firstBlockId = cur.content.content[0].attrs.blockId
   const opsRes = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
     baseVersion: cur.version,
     ops: [{ op: 'deleteBlocks', blockIds: [firstBlockId] }],
   })
   expect(opsRes.status()).toBe(200)
+  const left = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+  expect(left.content.content.length).toBeGreaterThanOrEqual(1)
   await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 10_000 })
   // 刷新为最新版本（保留草稿）→ 冲突解决、草稿归档进横幅（saveStatus 回 saved）
   await refreshAfterConflictAck(p)
@@ -862,6 +887,8 @@ test('17. 冲突下载成功才解锁；再次冲突必须重新确认', async (
   const doc = await server.createDoc('dl-ack')
   const A = api(page.request, server.baseUrl, bearer(server.apiKey))
   await A.post(`/api/docs/${doc.docId}/outline`, {})
+  // 两次 provoke 各删正在编辑的首块，删完仍至少留一块
+  await seedSpareBlocks(A, doc.docId, 2)
   const p = await outlinePage(doc.docId)
   const ed = editor(p)
   await p.route(`**/api/docs/${doc.docId}/outline`, async route => {
@@ -872,21 +899,44 @@ test('17. 冲突下载成功才解锁；再次冲突必须重新确认', async (
     else await route.continue()
   })
   const provoke = async (marker: string) => {
-    await ed.click()
+    await ed.locator('p').first().click()
     await p.keyboard.type(marker)
     await expect(p.locator('.save')).toContainText(/未保存|保存中/, { timeout: 5_000 })
     const cur = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+    expect(cur.content.content.length).toBeGreaterThanOrEqual(2)
     const id = cur.content.content[0].attrs.blockId
     const ops = await A.post(`/api/docs/${doc.docId}/outline/ops`, {
       baseVersion: cur.version,
       ops: [{ op: 'deleteBlocks', blockIds: [id] }],
     })
     expect(ops.status()).toBe(200)
+    const left = await (await A.get(`/api/docs/${doc.docId}/outline`)).json()
+    expect(left.content.content.length).toBeGreaterThanOrEqual(1)
+    expect(left.content.content.map((b: { attrs: { blockId: string } }) => b.attrs.blockId)).not.toContain(id)
     await expect(p.locator('.banner.conflict')).toBeVisible({ timeout: 10_000 })
   }
   await provoke('DL-ONE')
   const refresh = p.locator('button:has-text("刷新为最新版本")')
   await expect(refresh).toBeDisabled()
+  await p.evaluate(() => {
+    const g = globalThis as unknown as {
+      URL: { createObjectURL: (...args: unknown[]) => string }
+      __pptRestoreCreateObjectURL?: () => void
+    }
+    const orig = g.URL.createObjectURL.bind(g.URL)
+    g.URL.createObjectURL = () => { throw new Error('download blocked') }
+    g.__pptRestoreCreateObjectURL = () => {
+      g.URL.createObjectURL = orig
+    }
+  })
+  await p.locator('button:has-text("下载草稿 JSON")').click()
+  await expect(p.locator('.err')).toContainText('下载失败', { timeout: 5_000 })
+  await expect(refresh).toBeDisabled()
+  await p.evaluate(() => {
+    const g = globalThis as unknown as { __pptRestoreCreateObjectURL?: () => void }
+    g.__pptRestoreCreateObjectURL?.()
+    delete g.__pptRestoreCreateObjectURL
+  })
   const [download] = await Promise.all([
     p.waitForEvent('download'),
     p.locator('button:has-text("下载草稿 JSON")').click(),

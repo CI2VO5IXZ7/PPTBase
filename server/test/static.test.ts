@@ -1,35 +1,76 @@
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { request as httpRequest, type IncomingHttpHeaders } from 'node:http'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
+import { normalizeRequestPath } from '../src/app'
 import { auth, createUser, makeApp, PNG_DATA_URL, type TestContext } from './helpers'
 
 // §八 M5：生产模式下服务端用 @fastify/static 托管前端构建产物（vite assetsDir=static），
 // SPA fallback 只回退非 API 路径；/assets /exports /mcp /api 仍走各自路由
 let ctx: TestContext
-let staticDir = ''
+let sandboxDir = ''
+let ctxReady = false
+
+function isCreatedTmpSandbox(dir: string): boolean {
+  if (!dir) return false
+  const root = resolve(tmpdir())
+  const target = resolve(dir)
+  const rel = relative(root, target)
+  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false
+  return rel.split(sep)[0].startsWith('pptist-static-')
+}
 
 beforeAll(async () => {
-  const sandbox = mkdtempSync(join(tmpdir(), 'pptist-static-'))
-  staticDir = join(sandbox, 'web')
+  sandboxDir = mkdtempSync(join(tmpdir(), 'pptist-static-'))
+  const staticDir = join(sandboxDir, 'web')
   mkdirSync(join(staticDir, 'static'), { recursive: true })
-  writeFileSync(join(sandbox, 'outside-leak.txt'), 'SECRET_OUTSIDE_STATIC_ROOT')
+  writeFileSync(join(sandboxDir, 'outside-leak.txt'), 'SECRET_OUTSIDE_STATIC_ROOT')
   writeFileSync(join(staticDir, 'outside-leak.txt'), 'INSIDE_STATIC_ROOT')
   writeFileSync(join(staticDir, 'index.html'), '<!doctype html><html><body>pptist-index</body></html>')
   writeFileSync(join(staticDir, 'admin.html'), '<!doctype html><html><body>pptist-admin <script src="./static/admin-x.js"></script></body></html>')
   writeFileSync(join(staticDir, 'static', 'index-abc123.js'), 'console.log("bundle")')
   writeFileSync(join(staticDir, 'static', 'admin-x.js'), 'console.log("admin-bundle")')
   ctx = await makeApp({ STATIC_DIR: staticDir })
+  ctxReady = true
+  // inject 会先走 WHATWG URL，把 /./admin.html 折成 /admin.html。
+  // 监听后用 http.request 发送原始请求行，才能覆盖点段路径。
+  await ctx.app.listen({ host: '127.0.0.1', port: 0 })
 })
 
 afterAll(async () => {
-  await ctx.app.close()
-  try {
-    rmSync(join(staticDir, '..'), { recursive: true, force: true })
+  if (ctxReady) await ctx.app.close()
+  if (isCreatedTmpSandbox(sandboxDir)) {
+    try {
+      rmSync(sandboxDir, { recursive: true, force: true })
+    }
+    catch { /* ignore */ }
   }
-  catch { /* ignore */ }
 })
+
+function headerValue(headers: IncomingHttpHeaders, name: string): string {
+  const value = headers[name]
+  return Array.isArray(value) ? value.join(',') : value ?? ''
+}
+
+function rawGet(port: number, requestPath: string): Promise<{ status: number, headers: IncomingHttpHeaders, body: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path: requestPath, method: 'GET' }, res => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => {
+        resolvePromise({
+          status: res.statusCode ?? 0,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        })
+      })
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
 
 describe('静态前端托管', () => {
   it('GET / 返回 index.html', async () => {
@@ -167,6 +208,42 @@ describe('静态前端托管', () => {
     const res = await ctx.app.inject({ method: 'GET', url: '/static/' })
     expect(res.body).not.toMatch(/<a href=/i)
     expect(res.body).not.toMatch(/Directory listing/i)
+  })
+
+  it('点段折叠后仍给管理页套安全头，逃出根的 .. 不能读到父目录', async () => {
+    expect(normalizeRequestPath('/./admin.html')).toBe('/admin.html')
+    expect(normalizeRequestPath('/%2e/admin.html')).toBe('/admin.html')
+    expect(normalizeRequestPath('/././admin.html')).toBe('/admin.html')
+    expect(normalizeRequestPath('/static/../admin.html')).toBe('/admin.html')
+    expect(normalizeRequestPath('/admin/../admin.html')).toBe('/admin.html')
+    expect(normalizeRequestPath('/admin/')).toBe('/admin/')
+    expect(normalizeRequestPath('/%61dmin.html?x=1')).toBe('/admin.html')
+    expect(normalizeRequestPath('/../outside-leak.txt')).toBe('/outside-leak.txt')
+    expect(normalizeRequestPath('/static/../../outside-leak.txt')).toBe('/outside-leak.txt')
+    expect(normalizeRequestPath('/%2e%2e/outside-leak.txt')).not.toContain('..')
+
+    const addr = ctx.app.server.address()
+    if (!addr || typeof addr === 'string') throw new Error('静态测试服务未监听')
+    const port = addr.port
+    for (const url of ['/./admin.html', '/%2e/admin.html', '/static/../admin.html', '/admin/../admin.html']) {
+      const res = await rawGet(port, url)
+      expect(headerValue(res.headers, 'content-security-policy')).toContain("default-src 'self'")
+      expect(headerValue(res.headers, 'x-frame-options')).toBe('DENY')
+      expect(headerValue(res.headers, 'cache-control')).toBe('no-store')
+      expect(headerValue(res.headers, 'x-content-type-options')).toBe('nosniff')
+      expect(headerValue(res.headers, 'referrer-policy')).toBe('same-origin')
+      expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
+      if (res.body.includes('pptist-admin')) expect(res.status).toBe(200)
+    }
+    for (const url of [
+      '/../outside-leak.txt',
+      '/%2e%2e/outside-leak.txt',
+      '/static/../../outside-leak.txt',
+      '/static/%2e%2e/%2e%2e/outside-leak.txt',
+    ]) {
+      const res = await rawGet(port, url)
+      expect(res.body).not.toContain('SECRET_OUTSIDE_STATIC_ROOT')
+    }
   })
 })
 
