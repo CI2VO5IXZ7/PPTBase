@@ -128,7 +128,7 @@ import { useOutlineStore } from '@/store/outline'
 import useOutlineSync from '@/hooks/useOutlineSync'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
 import { outlineActionBlocked } from '@/utils/outline/submitGate'
-import { conflictRefreshAllowed, navigationNeedsLeave, textsEqual } from '@/utils/outline/editorGuards'
+import { commentRevisionCurrent, conflictRefreshAllowed, navigationNeedsLeave, reviewedVersionCurrent, sameDraftBody, textsEqual } from '@/utils/outline/editorGuards'
 import { topLevelBlockIds } from '@/utils/outline/navigatorTree'
 import { submitOutlineFeedback, approveOutline, revokeOutlineApproval, postOutlineOps } from '@/services/outline'
 import OutlineEditor from './OutlineEditor.vue'
@@ -155,7 +155,10 @@ const conflictDraftPreserved = ref(false)
 const commentModalOpen = ref(false)
 const pendingCommentAnchor = ref<OutlineAnchorSpec | null>(null)
 const pendingCommentTexts = ref<string[] | null>(null)
+const pendingCommentRev = ref<number | null>(null)
 const commentSubmitting = ref(false)
+const moving = ref(false)
+const approveReviewedVersion = ref<number | null>(null)
 const linkModalOpen = ref(false)
 const approveConfirmOpen = ref(false)
 const approveConfirmText = ref('')
@@ -234,7 +237,7 @@ const postOps = async (op: Record<string, unknown>) => {
 const onThreadOp = (op: Record<string, unknown>) => void postOps(op)
 
 const onMoveBlock = async ({ blockId, direction }: { blockId: string, direction: 'up' | 'down' }) => {
-  if (outline.readonly || outline.saveStatus === 'conflict') return
+  if (moving.value || outline.readonly || outline.saveStatus === 'conflict') return
   const ids = topLevelBlockIds(editorContent.value)
   const i = ids.indexOf(blockId)
   if (i < 0) return
@@ -247,7 +250,15 @@ const onMoveBlock = async ({ blockId, direction }: { blockId: string, direction:
     if (i >= ids.length - 1) return
     op.after = ids[i + 1]
   }
-  await postOps(op)
+  moving.value = true
+  editorRef.value?.setMoveLock(true)
+  try {
+    await postOps(op)
+  }
+  finally {
+    editorRef.value?.setMoveLock(false)
+    moving.value = false
+  }
 }
 
 const onLocate = (t: OutlineThread) => {
@@ -259,6 +270,7 @@ const onLocate = (t: OutlineThread) => {
 const onCommentRange = (anchor: OutlineAnchorSpec) => {
   pendingCommentAnchor.value = anchor
   pendingCommentTexts.value = anchor.kind === 'textRange' ? editorRef.value?.anchorFragmentTexts(anchor) ?? null : null
+  pendingCommentRev.value = anchor.kind === 'textRange' ? editorRef.value?.contentRevision() ?? null : null
   commentModalOpen.value = true
 }
 
@@ -283,16 +295,19 @@ const onCommentModalSubmit = async (text: string) => {
       outline.lastError = '请先解决未保存/冲突内容'
       return
     }
-    if (anchor.kind === 'textRange' && !textsEqual(expected, editorRef.value?.anchorFragmentTexts(anchor) ?? null)) {
+    const revisionOk = commentRevisionCurrent(pendingCommentRev.value, editorRef.value?.contentRevision() ?? null)
+    if (anchor.kind === 'textRange' && (!revisionOk || !textsEqual(expected, editorRef.value?.anchorFragmentTexts(anchor) ?? null))) {
       outline.lastError = '正文已变化，请重新选择文字后再批注'
       commentModalOpen.value = false
       pendingCommentAnchor.value = null
       pendingCommentTexts.value = null
+      pendingCommentRev.value = null
       return
     }
     commentModalOpen.value = false
     pendingCommentAnchor.value = null
     pendingCommentTexts.value = null
+    pendingCommentRev.value = null
     await postOps({ op: 'addComment', anchor, content: text })
   }
   finally {
@@ -338,14 +353,22 @@ const onApprove = async () => {
     outline.lastError = '内容未保存完成，暂不能确认'
     return
   }
+  const reviewed = outline.version
+  approveReviewedVersion.value = reviewed
   busy.value = true
   try {
-    await approveOutline(documentStore.docId, { baseVersion: outline.version, requestId: nanoid(16), acknowledgeOpenThreads: false })
+    await approveOutline(documentStore.docId, { baseVersion: reviewed, requestId: nanoid(16), acknowledgeOpenThreads: false })
+    approveReviewedVersion.value = null
     await sync.refresh()
   }
   catch (err) {
     const e = err as { status?: number, issues?: { openThreads?: number }, message?: string }
     if (e.status === 409 && (e.issues as { openThreads?: number })?.openThreads) {
+      if (!reviewedVersionCurrent(reviewed, outline.version)) {
+        approveConfirmOpen.value = false
+        outline.lastError = '大纲版本已变化，请重新审阅后再确认'
+        return
+      }
       const n = (e.issues as { openThreads: number }).openThreads
       approveConfirmText.value = `还有 ${n} 条未解决批注，仍确认当前版本进入制作？`
       approveConfirmOpen.value = true
@@ -358,14 +381,32 @@ const onApprove = async () => {
 }
 
 const onApproveAckThreads = async () => {
-  if (!(await guard())) {
+  const reviewed = approveReviewedVersion.value
+  editorRef.value?.flushNow()
+  await Promise.resolve()
+  if (outline.uploadsPending) {
+    outline.lastError = '有图片上传未完成'
+    return
+  }
+  if (sync.hasUnsavedChanges() || reviewed == null || !reviewedVersionCurrent(reviewed, outline.version)) {
+    approveConfirmOpen.value = false
+    outline.lastError = '大纲版本已变化，请重新审阅后再确认'
+    return
+  }
+  if (!(await sync.drain())) {
     outline.lastError = '内容未保存完成，暂不能确认'
+    return
+  }
+  if (!reviewedVersionCurrent(reviewed, outline.version)) {
+    approveConfirmOpen.value = false
+    outline.lastError = '大纲版本已变化，请重新审阅后再确认'
     return
   }
   approveConfirmOpen.value = false
   busy.value = true
   try {
-    await approveOutline(documentStore.docId, { baseVersion: outline.version, requestId: nanoid(16), acknowledgeOpenThreads: true })
+    await approveOutline(documentStore.docId, { baseVersion: reviewed, requestId: nanoid(16), acknowledgeOpenThreads: true })
+    approveReviewedVersion.value = null
     await sync.refresh()
   }
   catch (err) {
@@ -416,9 +457,16 @@ const copyDraft = async () => {
   if (!payload) return
   const text = JSON.stringify(payload, null, 2)
   if (!text.includes('"content"') || text.length < 10) return
+  const copied = JSON.parse(JSON.stringify({ content: payload.content, steps: payload.steps })) as { content: unknown, steps: unknown }
   try {
     if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
     await navigator.clipboard.writeText(text)
+    const now = buildDraftPayload()
+    if (!sameDraftBody(copied, now ? { content: now.content, steps: now.steps } : null)) {
+      conflictDraftPreserved.value = false
+      outline.lastError = '草稿已变化，请重新复制后再刷新'
+      return
+    }
     conflictDraftPreserved.value = true
     outline.lastError = '草稿已复制到剪贴板（JSON）'
   }

@@ -8,6 +8,26 @@ export function textsEqual(
   return a.every((text, i) => text === b[i])
 }
 
+// 批注弹层打开时记下的正文修订。修订变了就不能只凭片段文本相同就沿用旧偏移。
+export function commentRevisionCurrent(opened: number | null, current: number | null): boolean {
+  return opened != null && current != null && opened === current
+}
+
+// 二次确认只能批准第一次确认时用户看到的版本。
+export function reviewedVersionCurrent(reviewed: number | null, current: number): boolean {
+  return reviewed != null && reviewed === current
+}
+
+// 复制完成后，正文或 steps 与按下复制时不一致就不能解锁刷新。
+export function sameDraftBody(
+  copied: { content: unknown, steps: unknown } | null,
+  current: { content: unknown, steps: unknown } | null,
+): boolean {
+  if (!copied || !current) return false
+  return JSON.stringify(copied.content) === JSON.stringify(current.content)
+    && JSON.stringify(copied.steps) === JSON.stringify(current.steps)
+}
+
 // 链接弹层打开时记下的选区。正文版本变了就不用旧坐标，避免标到另一段文字或静默丢弃。
 export function unchangedLinkRange(
   pending: { from: number, to: number, docRev: number } | null,

@@ -13,6 +13,7 @@
 <script lang="ts" setup>
 import { ref, watch } from 'vue'
 import Modal from '@/components/Modal.vue'
+import { normalizeHttpsHref } from '@/utils/outline/linkHref'
 
 const props = defineProps<{ visible: boolean, initialHref?: string }>()
 const emit = defineEmits<{ submit: [href: string], cancel: [] }>()
@@ -22,23 +23,19 @@ const error = ref('')
 
 watch(() => props.visible, v => {
   if (v) {
-    href.value = props.initialHref?.startsWith('https://') ? props.initialHref : 'https://'
+    const initial = props.initialHref ? normalizeHttpsHref(props.initialHref) : null
+    href.value = initial && initial.ok ? initial.href : 'https://'
     error.value = ''
   }
 })
 
 function submit() {
-  let h = href.value.trim()
-  if (!h.startsWith('https://')) {
-    if (h.startsWith('http://')) {
-      error.value = '请使用 https:// 链接'
-      return
-    }
-    h = `https://${h}`
+  const result = normalizeHttpsHref(href.value)
+  if (!result.ok) {
+    error.value = result.error
+    return
   }
-  try { new URL(h) }
-  catch { error.value = '链接格式无效'; return }
-  emit('submit', h)
+  emit('submit', result.href)
 }
 </script>
 

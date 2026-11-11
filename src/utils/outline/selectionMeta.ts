@@ -22,6 +22,14 @@ export function blockAtSelection(doc: PMNode, sel: Selection): { blockId: string
   return { blockId: null, topLevel: false }
 }
 
+// 远端替换会丢掉选区。按稳定 blockId 放回原区块；原先是节点选区时继续用节点选区。
+export function selectionKeepingBlock(doc: PMNode, blockId: string, preferNode: boolean): Selection | null {
+  const ref = blockIndex(doc).get(blockId)
+  if (!ref) return null
+  if (preferNode && NodeSelection.isSelectable(ref.node)) return NodeSelection.create(doc, ref.pos)
+  return selectionForBlock(doc, blockId)
+}
+
 export function selectionForBlock(doc: PMNode, blockId: string): Selection | null {
   const ref = blockIndex(doc).get(blockId)
   if (!ref) return null

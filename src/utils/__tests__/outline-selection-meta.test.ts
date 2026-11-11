@@ -4,8 +4,9 @@ import { NodeSelection, TextSelection } from 'prosemirror-state'
 import { outlineSchema as S } from '../outline/schema.ts'
 import { textRangeFragmentTexts } from '../outline/anchors.ts'
 import { selectionToAnchorSpec } from '../outline/anchorSpec.ts'
-import { blockAtSelection, selectionForBlock } from '../outline/selectionMeta.ts'
-import { textsEqual, unchangedLinkRange, conflictRefreshAllowed, navigationNeedsLeave } from '../outline/editorGuards.ts'
+import { blockAtSelection, selectionForBlock, selectionKeepingBlock } from '../outline/selectionMeta.ts'
+import { textsEqual, unchangedLinkRange, conflictRefreshAllowed, navigationNeedsLeave, commentRevisionCurrent, reviewedVersionCurrent, sameDraftBody } from '../outline/editorGuards.ts'
+import { normalizeHttpsHref } from '../outline/linkHref.ts'
 
 const text = (value: string) => S.text(value)
 const para = (id: string, value: string) => S.nodes.paragraph.create({ blockId: id }, value ? text(value) : null)
@@ -92,6 +93,42 @@ test('同一文本块前插入文字后，旧 textRange 片段原文对不上', 
   assert.equal(textsEqual(expected, textRangeFragmentTexts(shifted, spec)), false)
   const otherBlock = S.nodes.doc.create(null, [para('p0', '前面一段'), para('p1', 'ABCDEF')])
   assert.equal(textsEqual(expected, textRangeFragmentTexts(otherBlock, spec)), true)
+})
+
+test('远端替换后按 blockId 放回原区块，节点选区保持节点选区', () => {
+  const doc = S.nodes.doc.create(null, [para('A', '甲'), para('B', '乙'), image('img')])
+  const textSel = selectionKeepingBlock(doc, 'B', false)
+  assert.ok(textSel instanceof TextSelection)
+  assert.equal(blockAtSelection(doc, textSel!).blockId, 'B')
+  const nodeSel = selectionKeepingBlock(doc, 'img', true)
+  assert.ok(nodeSel instanceof NodeSelection)
+  assert.equal((nodeSel as NodeSelection).node.attrs.blockId, 'img')
+  assert.equal(selectionKeepingBlock(doc, 'missing', false), null)
+  const before = S.nodes.doc.create(null, [para('A', '甲'), para('B', '乙'), para('C', '丙')])
+  const moved = S.nodes.doc.create(null, [para('A', '甲'), para('C', '丙'), para('B', '乙')])
+  const kept = selectionKeepingBlock(moved, 'B', false)
+  assert.equal(blockAtSelection(moved, kept!).blockId, 'B')
+  assert.notEqual(blockAtSelection(moved, TextSelection.atStart(moved)).blockId, 'B')
+  assert.equal(blockAtSelection(before, TextSelection.create(before, blockPos(before, 'B') + 1)).blockId, 'B')
+})
+
+test('https 前缀不区分大小写；http 仍拒绝；复制后的草稿必须仍是同一份', () => {
+  const https = normalizeHttpsHref('HTTPS://example.com/path')
+  assert.equal(https.ok, true)
+  if (https.ok) {
+    assert.equal(https.href, 'HTTPS://example.com/path')
+    assert.equal(new URL(https.href).hostname, 'example.com')
+  }
+  assert.deepEqual(normalizeHttpsHref('Http://example.com'), { ok: false, error: '请使用 https:// 链接' })
+  assert.equal(normalizeHttpsHref('example.com/a').ok && normalizeHttpsHref('example.com/a').href, 'https://example.com/a')
+  assert.equal(textsEqual(['ABC'], ['ABC']), true)
+  assert.equal(commentRevisionCurrent(1, 1), true)
+  assert.equal(commentRevisionCurrent(1, 2), false)
+  assert.equal(reviewedVersionCurrent(10, 10), true)
+  assert.equal(reviewedVersionCurrent(10, 11), false)
+  const body = { content: { type: 'doc' }, steps: [{ a: 1 }] }
+  assert.equal(sameDraftBody(body, { content: { type: 'doc' }, steps: [{ a: 1 }] }), true)
+  assert.equal(sameDraftBody(body, { content: { type: 'doc', changed: true }, steps: [{ a: 1 }] }), false)
 })
 
 test('链接选区只在正文修订号未变时沿用；冲突刷新在无草稿时放行；导航看 drain 之后的状态', () => {

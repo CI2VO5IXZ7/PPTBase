@@ -48,7 +48,7 @@ import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
 import { textRangeFragmentTexts } from '@/utils/outline/anchors'
 import { selectionToAnchorSpec } from '@/utils/outline/anchorSpec'
 import { unchangedLinkRange } from '@/utils/outline/editorGuards'
-import { blockAtSelection, selectionForBlock } from '@/utils/outline/selectionMeta'
+import { blockAtSelection, selectionForBlock, selectionKeepingBlock } from '@/utils/outline/selectionMeta'
 import { topLevelBlockIds } from '@/utils/outline/navigatorTree'
 import { uploadAsset } from '@/services/document'
 import { useDocumentStore } from '@/store/document'
@@ -79,8 +79,9 @@ const selectedTopBlock = ref<string | null>(null)
 const isTopLevel = ref(false)
 // moveNeighbor 读的是 EditorView 文档，不是响应式依赖。正文替换后选中 id 可能不变，靠修订号重算按钮。
 const docRev = ref(0)
-const canMoveUp = computed(() => !props.readonly && isTopLevel.value && !!selectedTopBlock.value && docRev.value >= 0 && moveNeighbor('up'))
-const canMoveDown = computed(() => !props.readonly && isTopLevel.value && !!selectedTopBlock.value && docRev.value >= 0 && moveNeighbor('down'))
+const moveLocked = ref(false)
+const canMoveUp = computed(() => !props.readonly && !moveLocked.value && isTopLevel.value && !!selectedTopBlock.value && docRev.value >= 0 && moveNeighbor('up'))
+const canMoveDown = computed(() => !props.readonly && !moveLocked.value && isTopLevel.value && !!selectedTopBlock.value && docRev.value >= 0 && moveNeighbor('down'))
 const uploading = computed(() => uploads.value.some(u => u.status === 'uploading'))
 const uploadingCount = computed(() => uploads.value.filter(u => u.status !== 'done').length)
 
@@ -151,8 +152,18 @@ function moveNeighbor(dir: 'up' | 'down'): boolean {
 }
 
 function emitMove(direction: 'up' | 'down') {
-  if (!selectedTopBlock.value || !isTopLevel.value) return
+  if (moveLocked.value || !selectedTopBlock.value || !isTopLevel.value) return
   emit('request-move', { blockId: selectedTopBlock.value, direction })
+}
+
+function setMoveLock(on: boolean) {
+  moveLocked.value = on
+  // 立刻重算 contenteditable。只改 ref 时，慢请求期间浏览器仍可能把按键写进正文。
+  if (view) view.updateState(view.state)
+}
+
+function contentRevision() {
+  return docRev.value
 }
 
 function refreshSelectionMeta() {
@@ -309,8 +320,9 @@ onMounted(() => {
   })
   view = new EditorView(editorRef.value!, {
     state,
-    editable: () => !props.readonly,
+    editable: () => !props.readonly && !moveLocked.value,
     dispatchTransaction(tr) {
+      if (moveLocked.value && tr.docChanged) return
       const newState = view!.state.apply(tr)
       view!.updateState(newState)
       canComment.value = true
@@ -360,7 +372,13 @@ watch(() => props.content, content => {
   if (pendingSteps.length > 0) return
   const next = S.nodeFromJSON(content)
   if (next.eq(view.state.doc)) return
+  const keepId = selectedTopBlock.value
+  const preferNode = view.state.selection instanceof NodeSelection
   view.updateState(EditorState.create({ schema: S, doc: next, plugins: view.state.plugins }))
+  if (keepId) {
+    const sel = selectionKeepingBlock(view.state.doc, keepId, preferNode)
+    if (sel) view.dispatch(view.state.tr.setSelection(sel).scrollIntoView())
+  }
   refreshSelectionMeta()
   docRev.value++
 })
@@ -390,6 +408,8 @@ defineExpose({
   scrollToBlockId,
   applyLinkHref,
   anchorFragmentTexts,
+  contentRevision,
+  setMoveLock,
   get selectedBlockId() { return selectedTopBlock.value },
   get isTopLevelSelection() { return isTopLevel.value },
 })
