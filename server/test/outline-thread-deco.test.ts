@@ -101,7 +101,7 @@ describe('buildThreadDecorations（块相对 offset → 当前文档坐标）', 
     expect(textAt(state.doc, r2.from, r2.to)).toBe('目标语句')
   })
 
-  it('imageAttrsTr：更新属性不移动节点；过期 pos 返回 null（面板可判定关闭）', () => {
+  it('imageAttrsTr：更新属性不移动节点；目标不是该图片时返回 null（面板可判定关闭）', () => {
     let state = EditorState.create({ schema: S, doc })
     let imgPos = -1
     state.doc.descendants((n, p) => {
@@ -111,13 +111,14 @@ describe('buildThreadDecorations（块相对 offset → 当前文档坐标）', 
       return true
     })
     expect(imgPos).toBeGreaterThan(0)
-    const tr = imageAttrsTr(state, imgPos, { caption: 'c', usage: 'include', usageDescription: 'd' })
+    const tr = imageAttrsTr(state, 'im1', { caption: 'c', usage: 'include', usageDescription: 'd' })
     expect(tr).toBeTruthy()
     state = state.apply(tr!)
     expect(state.doc.nodeAt(imgPos)?.attrs.caption).toBe('c')
     expect(state.doc.nodeAt(imgPos)?.attrs.usage).toBe('include')
-    // pos 指向非 image → null（组件据此关闭面板）
-    expect(imageAttrsTr(state, 0, { caption: 'x', usage: 'include', usageDescription: '' })).toBeNull()
+    expect(state.doc.nodeAt(imgPos)?.attrs.blockId).toBe('im1')
+    // 段落 blockId 不是 image → null（组件据此关闭面板）
+    expect(imageAttrsTr(state, 'p1', { caption: 'x', usage: 'include', usageDescription: '' })).toBeNull()
   })
 })
 

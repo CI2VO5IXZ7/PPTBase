@@ -42,6 +42,49 @@ export function conflictRefreshAllowed(draftPreserved: boolean, hasDraft: boolea
   return draftPreserved || !hasDraft
 }
 
+export interface DraftBody {
+  content: unknown
+  steps: unknown
+}
+
+// 备份解锁时留下的正文+steps。比较前先断开引用，避免之后 push steps 把快照一并改掉。
+export function cloneDraftBody(body: DraftBody | null): DraftBody | null {
+  if (!body) return null
+  return JSON.parse(JSON.stringify({ content: body.content, steps: body.steps })) as DraftBody
+}
+
+export const CONFLICT_REBACKUP_MESSAGE = '草稿已变化，请重新复制或下载后再刷新'
+
+// 冲突态下的本地正文事务才作废已备份标志。选区变化和远端替换不是 localDocChange。
+export function noteLocalConflictEdit(input: {
+  status: string
+  preserved: boolean
+  snapshot: DraftBody | null
+  localDocChange: boolean
+}): { preserved: boolean, snapshot: DraftBody | null, message: string | null } {
+  if (!input.localDocChange || input.status !== 'conflict' || !input.preserved) {
+    return { preserved: input.preserved, snapshot: input.snapshot, message: null }
+  }
+  return { preserved: false, snapshot: null, message: CONFLICT_REBACKUP_MESSAGE }
+}
+
+// flush 之后再决定能不能刷新。标志还在但正文/steps 与备份快照不一致时必须拒绝。
+export function conflictRefreshDecision(input: {
+  draftPreserved: boolean
+  hasDraft: boolean
+  snapshot: DraftBody | null
+  current: DraftBody | null
+}): { allowed: boolean, clearPreserve: boolean, message: string | null } {
+  if (!conflictRefreshAllowed(input.draftPreserved, input.hasDraft)) {
+    return { allowed: false, clearPreserve: false, message: null }
+  }
+  if (!input.hasDraft) return { allowed: true, clearPreserve: false, message: null }
+  if (!sameDraftBody(input.snapshot, input.current)) {
+    return { allowed: false, clearPreserve: true, message: CONFLICT_REBACKUP_MESSAGE }
+  }
+  return { allowed: true, clearPreserve: false, message: null }
+}
+
 // drain 之后再看当前状态。调用前的 dirty/saving 不能继续当成离开理由。
 export function navigationNeedsLeave(drained: boolean, hasUnsaved: boolean, saveStatus: string): boolean {
   if (!drained || hasUnsaved) return true

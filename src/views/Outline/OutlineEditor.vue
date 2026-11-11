@@ -37,7 +37,7 @@ import type { Step } from 'prosemirror-transform'
 import { EditorView } from 'prosemirror-view'
 import { createThreadDecoPlugin } from '@/utils/outline/threadDeco'
 import { createBlockIdPlugin } from '@/utils/outline/blockIds'
-import { imageAttrsTr } from '@/utils/outline/imageOps'
+import { imageAttrsTr, remapImageSel } from '@/utils/outline/imageOps'
 import {
   applyUploadedImage,
   canDispatchImage,
@@ -299,10 +299,18 @@ function flushQueuedImages() {
 }
 function applyImageAttrs() {
   if (!view || !imageSel.value) return
-  const { pos, caption, usage, usageDescription } = imageSel.value
-  const tr = imageAttrsTr(view.state, pos, { caption, usage, usageDescription })
+  const located = remapImageSel(view.state.doc, imageSel.value)
+  if (!located) {
+    imageSel.value = null
+    return
+  }
+  imageSel.value = located
+  const tr = imageAttrsTr(view.state, located.blockId, {
+    caption: located.caption, usage: located.usage, usageDescription: located.usageDescription,
+  })
   if (!tr) {
-    imageSel.value = null; return
+    imageSel.value = null
+    return
   }
   view.dispatch(tr)
   // 保持面板打开：用户可连续修改多个字段，显式「完成」或图片被删时才关闭
@@ -375,8 +383,7 @@ onMounted(() => {
       view!.updateState(newState)
       canComment.value = true
       if (imageSel.value && tr.docChanged) {
-        const n = newState.doc.nodeAt(imageSel.value.pos)
-        if (!n || n.type.name !== 'image' || n.attrs.blockId !== imageSel.value.blockId) imageSel.value = null
+        imageSel.value = remapImageSel(newState.doc, imageSel.value)
       }
       if (tr.selectionSet || tr.docChanged) refreshSelectionMeta()
       if (tr.docChanged) {
@@ -424,6 +431,8 @@ watch(() => props.content, content => {
   const keepId = selectedTopBlock.value
   const preferNode = view.state.selection instanceof NodeSelection
   view.updateState(EditorState.create({ schema: S, doc: next, plugins: view.state.plugins }))
+  // updateState 不走 dispatchTransaction。选区恢复那次 dispatch 往往没有 docChanged，必须先按 blockId 重映射。
+  if (imageSel.value) imageSel.value = remapImageSel(view.state.doc, imageSel.value)
   if (keepId) {
     const sel = selectionKeepingBlock(view.state.doc, keepId, preferNode)
     if (sel) view.dispatch(view.state.tr.setSelection(sel).scrollIntoView())

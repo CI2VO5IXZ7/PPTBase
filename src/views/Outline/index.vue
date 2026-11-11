@@ -128,7 +128,8 @@ import { useOutlineStore } from '@/store/outline'
 import useOutlineSync from '@/hooks/useOutlineSync'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
 import { outlineActionBlocked } from '@/utils/outline/submitGate'
-import { commentRevisionCurrent, conflictRefreshAllowed, navigationNeedsLeave, reviewedVersionCurrent, sameDraftBody, textsEqual } from '@/utils/outline/editorGuards'
+import { commentRevisionCurrent, cloneDraftBody, CONFLICT_REBACKUP_MESSAGE, conflictRefreshAllowed, conflictRefreshDecision, navigationNeedsLeave, noteLocalConflictEdit, reviewedVersionCurrent, sameDraftBody, textsEqual } from '@/utils/outline/editorGuards'
+import type { DraftBody } from '@/utils/outline/editorGuards'
 import { moveBlockedByPendingUploads } from '@/utils/outline/imageInsert'
 import { revokePendingBlobs, scheduleBlobRevoke, type BlobRevokeTimer } from '@/utils/outline/blobRevoke'
 import { topLevelBlockIds } from '@/utils/outline/navigatorTree'
@@ -153,7 +154,17 @@ const suspendRefresh = ref(false)
 const resolving = ref(false)
 const activeBlockId = ref<string | null>(null)
 const conflictDraftPreserved = ref(false)
+const preservedDraftBody = ref<DraftBody | null>(null)
 const draftBlobRevokes: BlobRevokeTimer[] = []
+
+const rememberPreservedDraft = (body: DraftBody) => {
+  preservedDraftBody.value = cloneDraftBody(body)
+  conflictDraftPreserved.value = true
+}
+const forgetPreservedDraft = () => {
+  conflictDraftPreserved.value = false
+  preservedDraftBody.value = null
+}
 
 const commentModalOpen = ref(false)
 const pendingCommentAnchor = ref<OutlineAnchorSpec | null>(null)
@@ -185,13 +196,15 @@ const saveText = computed(() => ({
 } as Record<string, string>)[outline.saveStatus])
 
 watch(() => outline.saveStatus, s => {
-  if (s === 'conflict') conflictDraftPreserved.value = false
+  if (s === 'conflict') forgetPreservedDraft()
 })
 watch(() => outline.conflictRemote?.version, () => {
-  if (outline.saveStatus === 'conflict') conflictDraftPreserved.value = false
+  if (outline.saveStatus === 'conflict') forgetPreservedDraft()
 })
 watch(() => outline.localDraft?.steps?.length, () => {
-  if (outline.saveStatus === 'conflict') conflictDraftPreserved.value = false
+  if (outline.saveStatus !== 'conflict' || !conflictDraftPreserved.value) return
+  forgetPreservedDraft()
+  if (outline.localDraft) outline.lastError = CONFLICT_REBACKUP_MESSAGE
 })
 
 const onDocJson = (doc: Record<string, unknown>) => {
@@ -199,6 +212,17 @@ const onDocJson = (doc: Record<string, unknown>) => {
   // trackEditorDoc 会把 buffered 置上。本地导航和移动邻居必须用这份正文，
   // 远端替换仍由 outline.content 的未保存守卫拦住。
   editorContent.value = doc
+  // 只在本地正文事务时作废备份。选区变化不发 doc-json；远端替换走 updateState，也不进这里。
+  const next = noteLocalConflictEdit({
+    status: outline.saveStatus,
+    preserved: conflictDraftPreserved.value,
+    snapshot: preservedDraftBody.value,
+    localDocChange: true,
+  })
+  if (next.preserved === conflictDraftPreserved.value) return
+  conflictDraftPreserved.value = next.preserved
+  preservedDraftBody.value = next.snapshot
+  if (next.message) outline.lastError = next.message
 }
 
 const onSelectionBlock = (id: string | null) => {
@@ -437,11 +461,27 @@ const onRevoke = async () => {
 }
 
 const onDiscardDraft = async () => {
-  if (resolving.value || !conflictRefreshAllowed(conflictDraftPreserved.value, !!outline.localDraft)) return
+  if (resolving.value) return
   resolving.value = true
   try {
     editorRef.value?.flushNow()
     await Promise.resolve()
+    const current = outline.localDraft
+      ? { content: outline.localDraft.content, steps: outline.localDraft.steps }
+      : null
+    const decision = conflictRefreshDecision({
+      draftPreserved: conflictDraftPreserved.value,
+      hasDraft: !!current,
+      snapshot: preservedDraftBody.value,
+      current,
+    })
+    if (!decision.allowed) {
+      if (decision.clearPreserve) {
+        forgetPreservedDraft()
+        outline.lastError = decision.message ?? CONFLICT_REBACKUP_MESSAGE
+      }
+      return
+    }
     await sync.resolveConflict()
   }
   finally {
@@ -471,16 +511,16 @@ const copyDraft = async () => {
     await navigator.clipboard.writeText(text)
     const now = buildDraftPayload()
     if (!sameDraftBody(copied, now ? { content: now.content, steps: now.steps } : null)) {
-      conflictDraftPreserved.value = false
+      forgetPreservedDraft()
       outline.lastError = '草稿已变化，请重新复制后再刷新'
       return
     }
-    conflictDraftPreserved.value = true
+    rememberPreservedDraft(copied)
     outline.lastError = '草稿已复制到剪贴板（JSON）'
   }
   catch {
     outline.lastError = '复制失败，请使用下载草稿 JSON'
-    conflictDraftPreserved.value = false
+    forgetPreservedDraft()
   }
 }
 
@@ -516,16 +556,16 @@ const downloadDraft = async () => {
     anchor.click()
     const now = buildDraftPayload()
     if (!sameDraftBody(snapshot, now ? { content: now.content, steps: now.steps } : null)) {
-      conflictDraftPreserved.value = false
+      forgetPreservedDraft()
       outline.lastError = '草稿已变化，请重新下载后再刷新'
       return
     }
-    conflictDraftPreserved.value = true
+    rememberPreservedDraft(snapshot)
     outline.lastError = '草稿已下载'
   }
   catch {
     outline.lastError = '下载失败'
-    conflictDraftPreserved.value = false
+    forgetPreservedDraft()
   }
   finally {
     anchor?.remove()
