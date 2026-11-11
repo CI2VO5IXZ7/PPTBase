@@ -30,15 +30,32 @@ test('右开边界：光标在段末仍属于该段', () => {
   assert.equal(hit.topLevel, true)
 })
 
-test('嵌套列表光标命中最外层列表，供顶层移动', () => {
+test('嵌套列表光标命中最近的带 blockId 祖先，不取外层列表', () => {
   const inner = para('p2', '项')
   const item = S.nodes.list_item.create({ blockId: 'li1' }, inner)
   const list = S.nodes.bullet_list.create({ blockId: 'list1' }, item)
   const doc = S.nodes.doc.create(null, [para('p1', '标题'), list])
   const p2 = blockPos(doc, 'p2')
   const hit = blockAtSelection(doc, TextSelection.create(doc, p2 + 1))
-  assert.equal(hit.blockId, 'list1')
-  assert.equal(hit.topLevel, true)
+  assert.equal(hit.blockId, 'p2')
+  assert.equal(hit.topLevel, false)
+  const listSel = blockAtSelection(doc, NodeSelection.create(doc, blockPos(doc, 'list1')))
+  assert.equal(listSel.blockId, 'list1')
+  assert.equal(listSel.topLevel, true)
+})
+
+test('内层没有 blockId 时继续向外找到最近的 list_item', () => {
+  const inner = S.nodes.paragraph.create({ blockId: '' }, text('项'))
+  const item = S.nodes.list_item.create({ blockId: 'li1' }, inner)
+  const list = S.nodes.bullet_list.create({ blockId: 'list1' }, item)
+  const doc = S.nodes.doc.create(null, [list])
+  let pos = -1
+  doc.descendants((node, nodePos) => {
+    if (node.isText && node.text === '项') pos = nodePos
+  })
+  const hit = blockAtSelection(doc, TextSelection.create(doc, pos))
+  assert.equal(hit.blockId, 'li1')
+  assert.equal(hit.topLevel, false)
 })
 
 test('滚动到图片和分隔线用节点选区，列表落到内部文本', () => {

@@ -4,23 +4,19 @@ import { NodeSelection, TextSelection, type Selection } from 'prosemirror-state'
 import { blockIndex } from './anchors.ts'
 
 export function blockAtSelection(doc: PMNode, sel: Selection): { blockId: string | null, topLevel: boolean } {
-  // 图片/分隔线的 NodeSelection.from 与前一节点的结束位置重合。
-  // 先认节点选区本身，避免被文档顺序里更早的前一块抢走。
+  // 节点选区直接认当前节点。图片的 from 与前一块的结束位置重合，不能按文档顺序去抢。
   if (sel instanceof NodeSelection) {
     const id = sel.node.attrs?.blockId
     if (typeof id === 'string' && id) {
       return { blockId: id, topLevel: sel.$from.depth === 0 }
     }
   }
-  const from = sel.from
-  for (const ref of blockIndex(doc).values()) {
-    // 右开区间：边界位置属于后面的节点。
-    // 嵌套光标仍先命中最外层带 blockId 的区块——顶层上移/下移移动的就是这个容器（v1）。
-    if (from >= ref.pos && from < ref.pos + ref.node.nodeSize) {
-      return {
-        blockId: ref.blockId,
-        topLevel: doc.resolve(ref.pos).depth === 0,
-      }
+  // 光标从所在位置向外找最近的带 blockId 的祖先，不取最外层列表。
+  const $from = sel.$from
+  for (let depth = $from.depth; depth >= 1; depth--) {
+    const id = $from.node(depth).attrs?.blockId
+    if (typeof id === 'string' && id) {
+      return { blockId: id, topLevel: depth === 1 }
     }
   }
   return { blockId: null, topLevel: false }
