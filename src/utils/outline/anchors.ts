@@ -11,7 +11,7 @@ import type {
   OutlineRangeFragment,
   OutlineThread,
 } from '../../types/outline'
-import { OUTLINE_LIMITS } from './schema'
+import { OUTLINE_LIMITS } from './schema.ts'
 
 export interface BlockRef {
   blockId: string
@@ -36,6 +36,24 @@ export function blockIndex(doc: PMNode): Map<string, BlockRef> {
 // textblock 的文本内容范围（不含自身边界 token）
 export function blockContentRange(ref: BlockRef): { from: number, to: number } {
   return { from: ref.pos + 1, to: ref.pos + ref.node.nodeSize - 1 }
+}
+
+// textRange 的 from/to 是块内偏移。弹层打开期间正文若在同一文本块前部插入，
+// 旧偏移会落到另一段文字上；用当时的片段原文对照提交时的文档。
+export function textRangeFragmentTexts(doc: PMNode, spec: OutlineAnchorSpec): string[] | null {
+  if (spec.kind !== 'textRange') return null
+  const index = blockIndex(doc)
+  const out: string[] = []
+  for (const frag of spec.fragments) {
+    const ref = index.get(frag.blockId)
+    if (!ref?.node.isTextblock) return null
+    const { from: cFrom, to: cTo } = blockContentRange(ref)
+    const size = cTo - cFrom
+    if (!Number.isInteger(frag.from) || !Number.isInteger(frag.to)
+      || frag.from < 0 || frag.to > size || frag.from >= frag.to) return null
+    out.push(doc.textBetween(cFrom + frag.from, cFrom + frag.to, ' ', ' '))
+  }
+  return out
 }
 
 function excerpt(text: string, max: number): string {

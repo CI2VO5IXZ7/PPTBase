@@ -849,6 +849,8 @@ test('16. 顶层下移：先保存再使 version 增加，首块上移禁用', a
   const ops = p.waitForResponse(r => r.url().includes('/outline/ops') && r.request().method() === 'POST' && r.status() === 200)
   await p.locator('button[title="顶层区块上移"]').click()
   await ops
+  await expect(p.locator('button[title="顶层区块上移"]')).toBeDisabled()
+  await expect(p.locator('button[title="顶层区块下移"]')).toBeEnabled()
   const after = await (await api(page.request, server.baseUrl, bearer(server.apiKey)).get(`/api/docs/${doc.docId}/outline`)).json()
   expect(after.version).toBeGreaterThan(before.version)
   const texts = after.content.content.map((b: { content?: { text?: string }[] }) => (b.content ?? []).map(c => c.text ?? '').join(''))

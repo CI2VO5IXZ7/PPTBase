@@ -42,14 +42,14 @@
           v-if="outline.saveStatus === 'conflict'"
           type="button"
           class="btn"
-          :disabled="resolving || !conflictDraftPreserved"
+          :disabled="resolving || !conflictRefreshAllowed(conflictDraftPreserved, !!outline.localDraft)"
           @click="onDiscardDraft"
         >
-          刷新为最新版本（保留草稿）
+          {{ outline.localDraft ? '刷新为最新版本（保留草稿）' : '刷新为最新版本' }}
         </button>
         <button v-if="outline.localDraft" type="button" class="btn" @click="onDropDraft">丢弃草稿</button>
       </div>
-      <p v-if="outline.saveStatus === 'conflict' && !conflictDraftPreserved" class="ack-hint">刷新前请先复制或下载草稿。</p>
+      <p v-if="outline.saveStatus === 'conflict' && outline.localDraft && !conflictDraftPreserved" class="ack-hint">刷新前请先复制或下载草稿。</p>
     </div>
     <div v-else-if="outline.saveStatus === 'offline'" class="banner">
       保存失败：{{ outline.lastError }}。修改已保留，恢复后会自动重试。
@@ -128,6 +128,7 @@ import { useOutlineStore } from '@/store/outline'
 import useOutlineSync from '@/hooks/useOutlineSync'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
 import { outlineActionBlocked } from '@/utils/outline/submitGate'
+import { conflictRefreshAllowed, navigationNeedsLeave, textsEqual } from '@/utils/outline/editorGuards'
 import { topLevelBlockIds } from '@/utils/outline/navigatorTree'
 import { submitOutlineFeedback, approveOutline, revokeOutlineApproval, postOutlineOps } from '@/services/outline'
 import OutlineEditor from './OutlineEditor.vue'
@@ -153,6 +154,8 @@ const conflictDraftPreserved = ref(false)
 
 const commentModalOpen = ref(false)
 const pendingCommentAnchor = ref<OutlineAnchorSpec | null>(null)
+const pendingCommentTexts = ref<string[] | null>(null)
+const commentSubmitting = ref(false)
 const linkModalOpen = ref(false)
 const approveConfirmOpen = ref(false)
 const approveConfirmText = ref('')
@@ -187,7 +190,9 @@ watch(() => outline.localDraft?.steps?.length, () => {
 
 const onDocJson = (doc: Record<string, unknown>) => {
   sync.trackEditorDoc(doc)
-  if (!sync.hasUnsavedChanges()) editorContent.value = doc
+  // trackEditorDoc 会把 buffered 置上。本地导航和移动邻居必须用这份正文，
+  // 远端替换仍由 outline.content 的未保存守卫拦住。
+  editorContent.value = doc
 }
 
 const onSelectionBlock = (id: string | null) => {
@@ -253,6 +258,7 @@ const onLocate = (t: OutlineThread) => {
 
 const onCommentRange = (anchor: OutlineAnchorSpec) => {
   pendingCommentAnchor.value = anchor
+  pendingCommentTexts.value = anchor.kind === 'textRange' ? editorRef.value?.anchorFragmentTexts(anchor) ?? null : null
   commentModalOpen.value = true
 }
 
@@ -261,12 +267,37 @@ const onRequestDocComment = () => {
   commentModalOpen.value = true
 }
 
-const onCommentModalSubmit = (text: string) => {
-  commentModalOpen.value = false
+const onCommentModalSubmit = async (text: string) => {
+  if (commentSubmitting.value) return
+  commentSubmitting.value = true
   const anchor = pendingCommentAnchor.value
-  pendingCommentAnchor.value = null
-  if (!anchor) return
-  void postOps({ op: 'addComment', anchor, content: text })
+  const expected = pendingCommentTexts.value
+  try {
+    if (!anchor) {
+      commentModalOpen.value = false
+      return
+    }
+    editorRef.value?.flushNow()
+    await Promise.resolve()
+    if (!(await sync.drain())) {
+      outline.lastError = '请先解决未保存/冲突内容'
+      return
+    }
+    if (anchor.kind === 'textRange' && !textsEqual(expected, editorRef.value?.anchorFragmentTexts(anchor) ?? null)) {
+      outline.lastError = '正文已变化，请重新选择文字后再批注'
+      commentModalOpen.value = false
+      pendingCommentAnchor.value = null
+      pendingCommentTexts.value = null
+      return
+    }
+    commentModalOpen.value = false
+    pendingCommentAnchor.value = null
+    pendingCommentTexts.value = null
+    await postOps({ op: 'addComment', anchor, content: text })
+  }
+  finally {
+    commentSubmitting.value = false
+  }
 }
 
 const onLinkSubmit = (href: string) => {
@@ -327,6 +358,10 @@ const onApprove = async () => {
 }
 
 const onApproveAckThreads = async () => {
+  if (!(await guard())) {
+    outline.lastError = '内容未保存完成，暂不能确认'
+    return
+  }
   approveConfirmOpen.value = false
   busy.value = true
   try {
@@ -353,7 +388,7 @@ const onRevoke = async () => {
 }
 
 const onDiscardDraft = async () => {
-  if (resolving.value || !conflictDraftPreserved.value) return
+  if (resolving.value || !conflictRefreshAllowed(conflictDraftPreserved.value, !!outline.localDraft)) return
   resolving.value = true
   try {
     editorRef.value?.flushNow()
@@ -419,15 +454,9 @@ const downloadDraft = () => {
 const onNavPpt = async (e: Event) => {
   e.preventDefault()
   editorRef.value?.flushNow()
-  const blocked = ['offline', 'dirty', 'saving', 'conflict'].includes(outline.saveStatus)
-  if (blocked || sync.hasUnsavedChanges()) {
-    const drained = await sync.drain()
-    if (!drained || blocked || sync.hasUnsavedChanges() || ['offline', 'dirty', 'conflict'].includes(outline.saveStatus)) {
-      leaveModalOpen.value = true
-      return
-    }
-  }
-  else if (!(await sync.drain())) {
+  await Promise.resolve()
+  const drained = await sync.drain()
+  if (navigationNeedsLeave(drained, sync.hasUnsavedChanges(), outline.saveStatus)) {
     leaveModalOpen.value = true
     return
   }

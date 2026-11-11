@@ -32,7 +32,7 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useOutlineStore } from '@/store/outline'
-import { EditorState, NodeSelection, TextSelection, PluginKey, type Command } from 'prosemirror-state'
+import { EditorState, NodeSelection, PluginKey, type Command } from 'prosemirror-state'
 import type { Step } from 'prosemirror-transform'
 import { EditorView } from 'prosemirror-view'
 import { createThreadDecoPlugin } from '@/utils/outline/threadDeco'
@@ -45,8 +45,10 @@ import { splitListItem, liftListItem, sinkListItem, wrapInList } from 'prosemirr
 import { nanoid } from 'nanoid'
 import { outlineViewSchema } from '@/utils/outline/viewSchema'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
-import { blockIndex } from '@/utils/outline/anchors'
+import { textRangeFragmentTexts } from '@/utils/outline/anchors'
 import { selectionToAnchorSpec } from '@/utils/outline/anchorSpec'
+import { unchangedLinkRange } from '@/utils/outline/editorGuards'
+import { blockAtSelection, selectionForBlock } from '@/utils/outline/selectionMeta'
 import { topLevelBlockIds } from '@/utils/outline/navigatorTree'
 import { uploadAsset } from '@/services/document'
 import { useDocumentStore } from '@/store/document'
@@ -75,8 +77,10 @@ const imageSel = ref<{ pos: number, blockId: string, caption: string, usage: str
 const canComment = ref(true)
 const selectedTopBlock = ref<string | null>(null)
 const isTopLevel = ref(false)
-const canMoveUp = computed(() => !props.readonly && isTopLevel.value && selectedTopBlock.value && moveNeighbor('up'))
-const canMoveDown = computed(() => !props.readonly && isTopLevel.value && selectedTopBlock.value && moveNeighbor('down'))
+// moveNeighbor 读的是 EditorView 文档，不是响应式依赖。正文替换后选中 id 可能不变，靠修订号重算按钮。
+const docRev = ref(0)
+const canMoveUp = computed(() => !props.readonly && isTopLevel.value && !!selectedTopBlock.value && docRev.value >= 0 && moveNeighbor('up'))
+const canMoveDown = computed(() => !props.readonly && isTopLevel.value && !!selectedTopBlock.value && docRev.value >= 0 && moveNeighbor('down'))
 const uploading = computed(() => uploads.value.some(u => u.status === 'uploading'))
 const uploadingCount = computed(() => uploads.value.filter(u => u.status !== 'done').length)
 
@@ -128,10 +132,12 @@ const insertHr: Command = (state, dispatch) => {
   if (dispatch) dispatch(state.tr.replaceSelectionWith(S.nodes.horizontal_rule.create({ blockId: `b_${nanoid(10)}` })).scrollIntoView())
   return true
 }
+let pendingLink: { from: number, to: number, docRev: number } | null = null
 function toggleLink() {
   if (!view) return
   const { state } = view
   if (state.selection.empty) return
+  pendingLink = { from: state.selection.from, to: state.selection.to, docRev: docRev.value }
   emit('request-link')
 }
 
@@ -151,28 +157,16 @@ function emitMove(direction: 'up' | 'down') {
 
 function refreshSelectionMeta() {
   if (!view) return
-  const { from } = view.state.selection
-  const idx = blockIndex(view.state.doc)
-  let found: string | null = null
-  let top = false
-  for (const ref of idx.values()) {
-    if (from >= ref.pos && from <= ref.pos + ref.node.nodeSize) {
-      found = ref.blockId
-      // blockIndex.pos 在节点之前。顶层区块在 doc 下，该位置 depth 为 0；嵌套区块更深。
-      top = view.state.doc.resolve(ref.pos).depth === 0
-      break
-    }
-  }
-  selectedTopBlock.value = found
-  isTopLevel.value = top
-  emit('selection-block', found, top)
+  const hit = blockAtSelection(view.state.doc, view.state.selection)
+  selectedTopBlock.value = hit.blockId
+  isTopLevel.value = hit.topLevel
+  emit('selection-block', hit.blockId, hit.topLevel)
 }
 
 function scrollToBlockId(blockId: string) {
   if (!view) return
-  const ref = blockIndex(view.state.doc).get(blockId)
-  if (!ref) return
-  const sel = TextSelection.create(view.state.doc, Math.min(ref.pos + 1, view.state.doc.content.size - 1))
+  const sel = selectionForBlock(view.state.doc, blockId)
+  if (!sel) return
   view.dispatch(view.state.tr.setSelection(sel).scrollIntoView())
   view.focus()
   refreshSelectionMeta()
@@ -324,8 +318,9 @@ onMounted(() => {
         const n = newState.doc.nodeAt(imageSel.value.pos)
         if (!n || n.type.name !== 'image' || n.attrs.blockId !== imageSel.value.blockId) imageSel.value = null
       }
-      if (tr.selectionSet) refreshSelectionMeta()
+      if (tr.selectionSet || tr.docChanged) refreshSelectionMeta()
       if (tr.docChanged) {
+        docRev.value++
         // 收集全部实际 step：原始 tr.steps + appendTransaction 补的 blockId 修正
         for (const step of tr.steps) pendingSteps.push(step.toJSON() as Record<string, unknown>)
         for (const step of appendedSteps.splice(0)) pendingSteps.push(step.toJSON() as Record<string, unknown>)
@@ -343,10 +338,19 @@ onMounted(() => {
 
 function applyLinkHref(href: string) {
   if (!view) return
-  const { state } = view
-  if (state.selection.empty) return
-  view.dispatch(state.tr.addMark(state.selection.from, state.selection.to, S.marks.link.create({ href, title: '' })))
+  const range = unchangedLinkRange(pendingLink, docRev.value)
+  pendingLink = null
+  if (!range) {
+    outlineStore.lastError = '正文已变化，请重新选择文字后再添加链接'
+    return
+  }
+  view.dispatch(view.state.tr.addMark(range.from, range.to, S.marks.link.create({ href, title: '' })))
   view.focus()
+}
+
+function anchorFragmentTexts(spec: OutlineAnchorSpec): string[] | null {
+  if (!view) return null
+  return textRangeFragmentTexts(view.state.doc, spec)
 }
 
 // 远端正文替换：suspendRefresh（未保存/IME）时不重建
@@ -357,6 +361,8 @@ watch(() => props.content, content => {
   const next = S.nodeFromJSON(content)
   if (next.eq(view.state.doc)) return
   view.updateState(EditorState.create({ schema: S, doc: next, plugins: view.state.plugins }))
+  refreshSelectionMeta()
+  docRev.value++
 })
 watch(() => props.readonly, () => view?.updateState(view.state))
 
@@ -383,6 +389,7 @@ defineExpose({
   pendingUploads: uploadingCount,
   scrollToBlockId,
   applyLinkHref,
+  anchorFragmentTexts,
   get selectedBlockId() { return selectedTopBlock.value },
   get isTopLevelSelection() { return isTopLevel.value },
 })
