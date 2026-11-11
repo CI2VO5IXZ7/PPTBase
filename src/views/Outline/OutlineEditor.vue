@@ -38,6 +38,15 @@ import { EditorView } from 'prosemirror-view'
 import { createThreadDecoPlugin } from '@/utils/outline/threadDeco'
 import { createBlockIdPlugin } from '@/utils/outline/blockIds'
 import { imageAttrsTr } from '@/utils/outline/imageOps'
+import {
+  applyUploadedImage,
+  canDispatchImage,
+  canMoveOutlineBlock,
+  flushHeldImages,
+  uploadStatusAfterInsert,
+  type ImageHold,
+  type UploadedImage,
+} from '@/utils/outline/imageInsert'
 import { undo, redo, history } from 'prosemirror-history'
 import { keymap } from 'prosemirror-keymap'
 import { baseKeymap, toggleMark, setBlockType, wrapIn, chainCommands, exitCode } from 'prosemirror-commands'
@@ -80,12 +89,27 @@ const isTopLevel = ref(false)
 // moveNeighbor 读的是 EditorView 文档，不是响应式依赖。正文替换后选中 id 可能不变，靠修订号重算按钮。
 const docRev = ref(0)
 const moveLocked = ref(false)
-const canMoveUp = computed(() => !props.readonly && !moveLocked.value && isTopLevel.value && !!selectedTopBlock.value && docRev.value >= 0 && moveNeighbor('up'))
-const canMoveDown = computed(() => !props.readonly && !moveLocked.value && isTopLevel.value && !!selectedTopBlock.value && docRev.value >= 0 && moveNeighbor('down'))
 const uploading = computed(() => uploads.value.some(u => u.status === 'uploading'))
 const uploadingCount = computed(() => uploads.value.filter(u => u.status !== 'done').length)
+const canMoveUp = computed(() => canMoveOutlineBlock({
+  readonly: props.readonly,
+  moveLocked: moveLocked.value,
+  uploadsPending: uploadingCount.value,
+  topLevel: isTopLevel.value,
+  hasBlock: !!selectedTopBlock.value,
+  hasNeighbor: docRev.value >= 0 && moveNeighbor('up'),
+}))
+const canMoveDown = computed(() => canMoveOutlineBlock({
+  readonly: props.readonly,
+  moveLocked: moveLocked.value,
+  uploadsPending: uploadingCount.value,
+  topLevel: isTopLevel.value,
+  hasBlock: !!selectedTopBlock.value,
+  hasNeighbor: docRev.value >= 0 && moveNeighbor('down'),
+}))
 
 let view: EditorView | null = null
+let imageHold: ImageHold = { queued: [] }
 const pendingSteps: Record<string, unknown>[] = []
 const appendedSteps: Step[] = [] // appendTransaction 补的 blockId 修正，必须与原始 steps 同批发送
 let flushTimer: ReturnType<typeof setTimeout> | null = null
@@ -160,6 +184,7 @@ function setMoveLock(on: boolean) {
   moveLocked.value = on
   // 立刻重算 contenteditable。只改 ref 时，慢请求期间浏览器仍可能把按键写进正文。
   if (view) view.updateState(view.state)
+  if (!on) flushQueuedImages()
 }
 
 function contentRevision() {
@@ -226,8 +251,7 @@ async function doUpload(item: { id: string, name: string, file: File, status: st
     u.error = (asset as { err: string }).err
     return
   }
-  u.status = 'done'
-  insertImageNode(asset.url, item.file.name, asset.id)
+  insertImageNode(asset.url, item.file.name, asset.id, item.id)
 }
 function retryUpload(u: (typeof uploads.value)[number]) {
   u.status = 'uploading'
@@ -237,17 +261,41 @@ function retryUpload(u: (typeof uploads.value)[number]) {
 function removeUpload(u: (typeof uploads.value)[number]) {
   uploads.value = uploads.value.filter(x => x.id !== u.id)
 }
-// 只读切换时清掉未上传占位（视图态不应挂起提交）
+// 只读切换时清掉未上传占位（视图态不应挂起提交）。已拿到的 asset 仍留在队列，只读期间不插入。
 watch(() => props.readonly, ro => {
   if (ro) uploads.value = []
+  else flushQueuedImages()
 })
-function insertImageNode(src: string, name: string, assetId = '') {
-  // 权限可能在上传期间变化：回调不得绕过只读
-  if (!view || props.readonly) return
+function insertGate() {
+  return { readonly: props.readonly, hasView: !!view, moveLocked: moveLocked.value }
+}
+function editorDispatchImage(image: UploadedImage): boolean {
+  if (!view || !canDispatchImage(insertGate())) return false
+  const revision = docRev.value
   const tr = view.state.tr.replaceSelectionWith(
-    S.nodes.image.create({ blockId: `b_${nanoid(10)}`, src, alt: name, caption: '', usage: 'reference', usageDescription: '', assetId })
+    S.nodes.image.create({ blockId: `b_${nanoid(10)}`, src: image.src, alt: image.name, caption: '', usage: 'reference', usageDescription: '', assetId: image.assetId }),
   ).scrollIntoView()
+  // 移动锁期间 dispatchTransaction 会丢掉 docChanged。这里必须当成没插入。
+  if (!canDispatchImage(insertGate()) || !tr.docChanged) return false
   view.dispatch(tr)
+  return docRev.value !== revision
+}
+function rememberInserted(image: UploadedImage) {
+  const row = uploads.value.find(item => item.id === image.uploadId)
+  if (!row || row.status === 'error') return
+  row.status = uploadStatusAfterInsert(true)
+}
+function insertImageNode(src: string, name: string, assetId = '', uploadId = ''): boolean {
+  const image: UploadedImage = { uploadId, src, name, assetId }
+  const result = applyUploadedImage(imageHold, image, insertGate(), editorDispatchImage)
+  imageHold = result.hold
+  if (result.inserted) rememberInserted(image)
+  return result.inserted
+}
+function flushQueuedImages() {
+  const result = flushHeldImages(imageHold, insertGate(), editorDispatchImage)
+  imageHold = result.hold
+  for (const image of result.inserted) rememberInserted(image)
 }
 function applyImageAttrs() {
   if (!view || !imageSel.value) return
@@ -346,6 +394,7 @@ onMounted(() => {
     },
   })
   refreshSelectionMeta()
+  flushQueuedImages()
 })
 
 function applyLinkHref(href: string) {

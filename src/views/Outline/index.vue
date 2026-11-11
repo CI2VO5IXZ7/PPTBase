@@ -129,6 +129,8 @@ import useOutlineSync from '@/hooks/useOutlineSync'
 import type { OutlineAnchorSpec, OutlineThread } from '@/types/outline'
 import { outlineActionBlocked } from '@/utils/outline/submitGate'
 import { commentRevisionCurrent, conflictRefreshAllowed, navigationNeedsLeave, reviewedVersionCurrent, sameDraftBody, textsEqual } from '@/utils/outline/editorGuards'
+import { moveBlockedByPendingUploads } from '@/utils/outline/imageInsert'
+import { revokePendingBlobs, scheduleBlobRevoke, type BlobRevokeTimer } from '@/utils/outline/blobRevoke'
 import { topLevelBlockIds } from '@/utils/outline/navigatorTree'
 import { submitOutlineFeedback, approveOutline, revokeOutlineApproval, postOutlineOps } from '@/services/outline'
 import OutlineEditor from './OutlineEditor.vue'
@@ -151,6 +153,7 @@ const suspendRefresh = ref(false)
 const resolving = ref(false)
 const activeBlockId = ref<string | null>(null)
 const conflictDraftPreserved = ref(false)
+const draftBlobRevokes: BlobRevokeTimer[] = []
 
 const commentModalOpen = ref(false)
 const pendingCommentAnchor = ref<OutlineAnchorSpec | null>(null)
@@ -237,6 +240,11 @@ const postOps = async (op: Record<string, unknown>) => {
 const onThreadOp = (op: Record<string, unknown>) => void postOps(op)
 
 const onMoveBlock = async ({ blockId, direction }: { blockId: string, direction: 'up' | 'down' }) => {
+  const blocked = moveBlockedByPendingUploads(outline.uploadsPending)
+  if (blocked) {
+    outline.lastError = blocked
+    return
+  }
   if (moving.value || outline.readonly || outline.saveStatus === 'conflict') return
   const ids = topLevelBlockIds(editorContent.value)
   const i = ids.indexOf(blockId)
@@ -521,7 +529,8 @@ const downloadDraft = async () => {
   }
   finally {
     anchor?.remove()
-    if (url) URL.revokeObjectURL(url)
+    // click() 同期 revoke 时，部分浏览器可能还没把文件读完。延后收回；卸载时再清未触发的定时器。
+    if (url) scheduleBlobRevoke(url, draftBlobRevokes, blobUrl => URL.revokeObjectURL(blobUrl))
   }
 }
 
@@ -575,6 +584,7 @@ onMounted(async () => {
 
 const DRAIN_TIMEOUT_MS = 3000
 onBeforeUnmount(() => {
+  revokePendingBlobs(draftBlobRevokes, blobUrl => URL.revokeObjectURL(blobUrl))
   window.removeEventListener('resize', mq)
   window.removeEventListener('beforeunload', onBeforeUnload)
   void (async () => {
